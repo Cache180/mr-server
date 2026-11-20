@@ -18,6 +18,117 @@
 
 #include "MRIdentity.h"
 
+#include <algorithm>
+#include <array>
+#include <fmt/format.h>
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
+
+namespace MR {
+
+namespace {
+    constexpr size_t MaxPacketBytes = 256;
+    constexpr size_t NameMin = 3;
+    constexpr size_t NameMax = 20;
+    constexpr size_t InstallMin = 32;
+    constexpr size_t InstallMax = 64;
+    constexpr size_t MrIdLength = 32;
+
+    // Solo se admite ASCII: la longitud en bytes coincide con la longitud en caracteres.
+    // Cualquier byte >= 0x80 (UTF-8 multibyte) cae fuera de las clases y se rechaza.
+    bool IsAlnum(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    }
+
+    char ToLowerAscii(char c) {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    }
+
+    bool EqualsIgnoreCaseAscii(std::string_view A, std::string_view B) {
+        return std::equal(A.begin(), A.end(), B.begin(), B.end(),
+            [](char X, char Y) { return ToLowerAscii(X) == ToLowerAscii(Y); });
+    }
+}
+
+bool IsValidPilotName(std::string_view Name) {
+    if (Name.size() < NameMin || Name.size() > NameMax) {
+        return false;
+    }
+    return std::all_of(Name.begin(), Name.end(), [](char c) {
+        return IsAlnum(c) || c == '_' || c == '.' || c == '-';
+    });
+}
+
+bool IsValidInstallKey(std::string_view Install) {
+    if (Install.size() < InstallMin || Install.size() > InstallMax) {
+        return false;
+    }
+    return std::all_of(Install.begin(), Install.end(), IsAlnum);
+}
+
+std::string DeriveMrId(std::string_view Install) {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> Digest {};
+    unsigned int DigestLen = 0;
+    if (EVP_Digest(Install.data(), Install.size(), Digest.data(), &DigestLen, EVP_sha256(), nullptr) != 1) {
+        return {};
+    }
+    std::string Hex;
+    Hex.reserve(DigestLen * 2);
+    for (unsigned int i = 0; i < DigestLen; ++i) {
+        Hex += fmt::format("{:02x}", Digest[i]);
+    }
+    Hex.resize(MrIdLength);
+    return Hex;
+}
+
+std::optional<Identity> ParseIdentityPacket(std::string_view Raw, std::string& Reason) {
+    if (Raw.size() > MaxPacketBytes) {
+        Reason = "paquete demasiado grande";
+        return std::nullopt;
+    }
+    // allow_exceptions = false: JSON o UTF-8 invalidos producen un valor "discarded", no una excepcion.
+    nlohmann::json Json = nlohmann::json::parse(Raw.begin(), Raw.end(), nullptr, false);
+    if (!Json.is_object()) {
+        Reason = "formato invalido";
+        return std::nullopt;
+    }
+    auto NameIt = Json.find("name");
+    auto InstallIt = Json.find("install");
+    if (NameIt == Json.end() || InstallIt == Json.end() || !NameIt->is_string() || !InstallIt->is_string()) {
+        Reason = "formato invalido";
+        return std::nullopt;
+    }
+    const auto& Name = NameIt->get_ref<const std::string&>();
+    const auto& Install = InstallIt->get_ref<const std::string&>();
+    if (!IsValidPilotName(Name)) {
+        Reason = "nombre invalido (3-20 caracteres: letras, numeros, _ . -)";
+        return std::nullopt;
+    }
+    if (!IsValidInstallKey(Install)) {
+        Reason = "instalacion invalida";
+        return std::nullopt;
+    }
+    return Identity { Name, DeriveMrId(Install) };
+}
+
+NameClash ClassifyNameClash(std::string_view Name, std::string_view MrId, std::string_view ExistingName, std::string_view ExistingMrId) {
+    if (!EqualsIgnoreCaseAscii(Name, ExistingName)) {
+        return NameClash::None;
+    }
+    return MrId == ExistingMrId ? NameClash::SameInstall : NameClash::OtherInstall;
+}
+
+std::string KickOutdated(const Version& Min) {
+    Version Copy = Min; // Version::AsString no es const
+    return fmt::format("MR Launcher desactualizado: se requiere la version >= {}", Copy.AsString());
+}
+
+std::string KickBadIdentity(std::string_view Reason) {
+    return fmt::format("Identidad invalida: {}", Reason);
+}
+
+}
+
 TEST_CASE("MR::IsValidPilotName") {
     CHECK(MR::IsValidPilotName("abc"));
     CHECK(MR::IsValidPilotName("Jesus.211_cache-1")); // 17
