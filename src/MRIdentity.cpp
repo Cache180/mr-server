@@ -131,7 +131,7 @@ std::string KickBadIdentity(std::string_view Reason) {
 
 TEST_CASE("MR::IsValidPilotName") {
     CHECK(MR::IsValidPilotName("abc"));
-    CHECK(MR::IsValidPilotName("Jesus.211_cache-1")); // 17
+    CHECK(MR::IsValidPilotName("Piloto.Uno_mr-123")); // 17
     CHECK(MR::IsValidPilotName(std::string(20, 'a')));
     CHECK_FALSE(MR::IsValidPilotName("ab"));
     CHECK_FALSE(MR::IsValidPilotName(std::string(21, 'a')));
