@@ -121,7 +121,7 @@ TEST_CASE("GetPidVid") {
     }
 }
 TServer::TServer(const std::vector<std::string_view>& Arguments) {
-    beammp_info("BeamMP Server v" + Application::ServerVersionString());
+    beammp_info("MR Server v" + Application::ServerVersionString() + " (basado en BeamMP-Server, AGPL-3.0)");
     Application::SetSubsystemStatus("Server", Application::Status::Starting);
     Application::SetSubsystemStatus("Server", Application::Status::Good);
 }

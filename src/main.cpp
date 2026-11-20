@@ -108,7 +108,7 @@ int BeamMPServerMain(MainArguments Arguments) {
         return 0;
     }
     if (Parser.FoundArgument({ "version" })) {
-        Application::Console().WriteRaw("BeamMP-Server v" + Application::ServerVersionString());
+        Application::Console().WriteRaw("MR Server v" + Application::ServerVersionString() + " (basado en BeamMP-Server, AGPL-3.0)");
         return 0;
     }
 
@@ -193,7 +193,6 @@ int BeamMPServerMain(MainArguments Arguments) {
     Application::Console().InitializeLuaConsole(*LuaEngine);
     LuaEngine->SetNetwork(&Network);
     PPSMonitor.SetNetwork(Network);
-    Application::CheckForUpdates();
 
     TPluginMonitor PluginMonitor(fs::path(Application::Settings.getAsString(Settings::Key::General_ResourceFolder)) / "Server", LuaEngine);
 
@@ -213,10 +212,6 @@ int BeamMPServerMain(MainArguments Arguments) {
 
     RegisterThread("Main(Waiting)");
 
-    std::set<std::string> IgnoreSubsystems {
-        "UpdateCheck" // Ignore as not to confuse users (non-vital system)
-    };
-
     bool FullyStarted = false;
     while (!Shutdown) {
         if (!FullyStarted) {
@@ -229,9 +224,6 @@ int BeamMPServerMain(MainArguments Arguments) {
                     continue;
                 }
 
-                if (IgnoreSubsystems.count(NameStatusPair.first) > 0) {
-                    continue; // ignore
-                }
                 if (NameStatusPair.second == Application::Status::Starting) {
                     FullyStarted = false;
                 } else if (NameStatusPair.second == Application::Status::Bad) {

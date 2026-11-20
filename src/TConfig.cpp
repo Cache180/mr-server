@@ -131,7 +131,7 @@ void TConfig::FlushToFile() {
     // auto data = toml::parse<toml::preserve_comments>(mConfigFileName);
     auto data = toml::value {};
     data["General"][StrAuthKey.data()] = Application::Settings.getAsString(Settings::Key::General_AuthKey);
-    SetComment(data["General"][StrAuthKey.data()].comments(), " AuthKey has to be filled out in order to run the server");
+    SetComment(data["General"][StrAuthKey.data()].comments(), " Unused by MR Server. Kept so existing config files stay compatible.");
     data["General"][StrLogChat.data()] = Application::Settings.getAsBool(Settings::Key::General_LogChat);
     SetComment(data["General"][StrLogChat.data()].comments(), " Whether to log chat messages in the console / log");
     data["General"][StrDebug.data()] = Application::Settings.getAsBool(Settings::Key::General_Debug);
@@ -155,13 +155,11 @@ void TConfig::FlushToFile() {
     // SetComment(data["General"][StrPassword.data()].comments(), " Sets a password on this server, which restricts people from joining. To join, a player must enter this exact password. Leave empty ("") to disable the password.");
     // Misc
     data["Misc"][StrHideUpdateMessages.data()] = Application::Settings.getAsBool(Settings::Key::Misc_ImScaredOfUpdates);
-    SetComment(data["Misc"][StrHideUpdateMessages.data()].comments(), " Hides the periodic update message which notifies you of a new server version. You should really keep this on and always update as soon as possible. For more information visit https://wiki.beammp.com/en/home/server-maintenance#updating-the-server. An update message will always appear at startup regardless.");
+    SetComment(data["Misc"][StrHideUpdateMessages.data()].comments(), " Unused by MR Server (there is no update check). Kept so existing config files stay compatible.");
     data["Misc"][StrUpdateReminderTime.data()] = Application::Settings.getAsString(Settings::Key::Misc_UpdateReminderTime);
-    SetComment(data["Misc"][StrUpdateReminderTime.data()].comments(), " Specifies the time between update reminders. You can use any of \"s, min, h, d\" at the end to specify the units seconds, minutes, hours or days. So 30d or 0.5min will print the update message every 30 days or half a minute.");
+    SetComment(data["Misc"][StrUpdateReminderTime.data()].comments(), " Unused by MR Server (there is no update check). Kept so existing config files stay compatible.");
     std::stringstream Ss;
-    Ss << "# This is the BeamMP-Server config file.\n"
-          "# Help & Documentation: `https://docs.beammp.com/server/server-maintenance/`\n"
-          "# IMPORTANT: Fill in the AuthKey with the key you got from `https://keymaster.beammp.com/` on the left under \"Keys\"\n"
+    Ss << "# This is the MR Server config file.\n"
        << toml::format(data);
     auto File = std::fopen(mConfigFileName.c_str(), "w+");
     if (!File) {
@@ -288,21 +286,8 @@ void TConfig::ParseFromFile(std::string_view name) {
     if (!mDisableConfig) {
         FlushToFile();
     }
-    // all good so far, let's check if there's a key
-    if (Application::Settings.getAsString(Settings::Key::General_AuthKey).empty()) {
-        if (mDisableConfig) {
-            beammp_error("No AuthKey specified in the environment.");
-        } else {
-            beammp_error("No AuthKey specified in the \"" + std::string(mConfigFileName) + "\" file. Please get an AuthKey, enter it into the config file, and restart this server.");
-        }
-        Application::SetSubsystemStatus("Config", Application::Status::Bad);
-        mFailed = true;
-        return;
-    }
+    // MR Server does not use the AuthKey: an empty one is valid.
     Application::SetSubsystemStatus("Config", Application::Status::Good);
-    if (Application::Settings.getAsString(Settings::Key::General_AuthKey).size() != 36) {
-        beammp_warn("AuthKey specified is the wrong length and likely isn't valid.");
-    }
 }
 
 void TConfig::PrintDebug() {
@@ -323,8 +308,6 @@ void TConfig::PrintDebug() {
     beammp_debug(std::string(StrLogChat) + ": \"" + (Application::Settings.getAsBool(Settings::Key::General_LogChat) ? "true" : "false") + "\"");
     beammp_debug(std::string(StrResourceFolder) + ": \"" + Application::Settings.getAsString(Settings::Key::General_ResourceFolder) + "\"");
     beammp_debug(std::string(StrAllowGuests) + ": \"" + (Application::Settings.getAsBool(Settings::Key::General_AllowGuests) ? "true" : "false") + "\"");
-    // special!
-    beammp_debug("Key Length: " + std::to_string(Application::Settings.getAsString(Settings::Key::General_AuthKey).length()) + "");
 }
 
 std::string TConfig::TagsAsPrettyArray() const {

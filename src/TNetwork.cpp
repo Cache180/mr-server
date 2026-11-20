@@ -436,10 +436,10 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
             { "client_ip", ClientIp }
         };
 
-        auto Target = "/pkToUser";
-
-        unsigned int ResponseCode = 0;
-        AuthResStr = Http::POST(Application::GetBackendUrlForAuth() + Target, AuthReq.dump(), "application/json", &ResponseCode);
+        // MR: el backend de autenticacion de BeamMP ya no existe. La identificacion
+        // MR (handshake `MR`) reemplaza este bloque; mientras tanto no se admite a nadie.
+        ClientKick(*Client, "Autenticacion MR no disponible todavia");
+        return nullptr;
 
     } catch (const std::exception& e) {
         beammp_debugf("Invalid json sent by client, kicking: {}", e.what());
@@ -530,7 +530,7 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
 
     if (!NotAllowedWithReason && !Application::Settings.getAsBool(Settings::Key::General_AllowGuests) && Client->IsGuest()) { //! NotAllowedWithReason because this message has the lowest priority
         NotAllowedWithReason = true;
-        Reason = "No guests are allowed on this server! To join, sign up at: forum.beammp.com.";
+        Reason = "No guests are allowed on this server!";
     }
 
     if (!NotAllowed && !NotAllowedWithReason && mServer.ClientCount() >= size_t(Application::Settings.getAsInt(Settings::Key::General_MaxPlayers)) && !BypassLimit) {

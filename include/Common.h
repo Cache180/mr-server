@@ -74,23 +74,12 @@ public:
     static TConsole& Console() { return mConsole; }
     static std::string ServerVersionString();
     static const Version& ServerVersion() { return mVersion; }
-    static Version ClientMinimumVersion() { return Version { 2, 7, 0 }; }
+    static Version ClientMinimumVersion() { return Version { 1, 0, 0 }; }
     static std::string PPS() { return mPPS; }
     static void SetPPS(const std::string& NewPPS) { mPPS = NewPPS; }
 
     static inline struct Settings Settings { };
 
-    static std::vector<std::string> GetBackendUrlsInOrder() {
-        return {
-            "https://backend.beammp.com",
-        };
-    }
-
-    static std::string GetServerCheckUrl() { return "https://check.beammp.com"; }
-
-    static std::string GetBackendUrlForAuth() { return "https://auth.beammp.com"; }
-    static std::string GetBackendUrlForSocketIO() { return "https://backend.beammp.com"; }
-    static void CheckForUpdates();
     static std::array<uint8_t, 3> VersionStrToInts(const std::string& str);
     static bool IsOutdated(const Version& Current, const Version& Newest);
     static bool IsShuttingDown();

@@ -31,7 +31,7 @@ public:
 
     static inline std::string lastCall = "";
 private:
-    std::string GenerateCall();
+    void GenerateCall();
     std::string GetPlayers();
 
     TResourceManager& mResourceManager;
