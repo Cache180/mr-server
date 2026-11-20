@@ -58,3 +58,26 @@ def recv_packet(sock, timeout=5.0):
     if length < 0:
         raise ValueError("longitud de paquete negativa: %d" % length)
     return _recv_exact(sock, length)
+
+
+def _as_bytes(value):
+    return value.encode("utf-8") if isinstance(value, str) else bytes(value)
+
+
+def handshake(sock, header, identity_json, timeout=5.0):
+    """Hace el saludo de un launcher: `C`, cabecera de version, identidad.
+
+    Envia el byte de tipo de conexion `C` (sin marco), el paquete de version
+    `header` (p. ej. `MR1.0`) y, si el servidor contesta `A`, el paquete de
+    identidad. Devuelve `(ok, reply)`: `ok` es True solo si la respuesta final
+    es `P<id>` (jugador aceptado); `reply` es el cuerpo de ese ultimo paquete
+    (o el de la expulsion `K...` si el servidor rechazo en cualquier paso).
+    """
+    sock.sendall(b"C")
+    send_packet(sock, _as_bytes(header))
+    first = recv_packet(sock, timeout)
+    if first != b"A":
+        return False, first
+    send_packet(sock, _as_bytes(identity_json))
+    reply = recv_packet(sock, timeout)
+    return reply[:1] == b"P" and reply[1:].isdigit(), reply

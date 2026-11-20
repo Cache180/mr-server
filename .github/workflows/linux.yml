@@ -116,6 +116,11 @@ jobs:
             python3 test/mr/test_nobackend.py -v
           RC=$?
 
+          # Misma instancia del server: cada prueba usa su propio nombre de piloto y cierra sus sockets.
+          MR_SERVER_PORT=30899 python3 test/mr/test_handshake.py -v
+          RC_HANDSHAKE=$?
+          if [ "$RC" -eq 0 ]; then RC=$RC_HANDSHAKE; fi
+
           kill -INT "$SERVER_PID" 2>/dev/null
           for _ in $(seq 1 40); do
             kill -0 "$SERVER_PID" 2>/dev/null || break
