@@ -478,3 +478,6 @@ callgrind.*
 notes/*
 compile_commands.json
 nohup.out
+
+# Excepcion: configuracion de pruebas de CI
+!test/mr/ServerConfig.ci.toml
