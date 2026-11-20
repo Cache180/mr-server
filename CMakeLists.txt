@@ -34,6 +34,7 @@ set(PRJ_HEADERS
     include/IThreaded.h
     include/Json.h
     include/LuaAPI.h
+    include/MRIdentity.h
     include/RWMutex.h
     include/SignalHandling.h
     include/TConfig.h
@@ -64,6 +65,7 @@ set(PRJ_SOURCES
     src/Compat.cpp
     src/Http.cpp
     src/LuaAPI.cpp
+    src/MRIdentity.cpp
     src/SignalHandling.cpp
     src/TConfig.cpp
     src/TConsole.cpp
