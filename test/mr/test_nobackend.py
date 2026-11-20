@@ -21,6 +21,7 @@ El servidor ya debe estar corriendo (lo arranca el workflow de CI) con
 
     MR_SERVER_BIN   ruta del binario (para buscar hosts del backend)
     MR_SERVER_LOG   archivo donde se redirigio la salida del servidor
+    MR_SERVER_PID   PID del servidor (para comprobar que sigue vivo)
     MR_SERVER_PORT  puerto (por defecto 30899)
     MR_SERVER_HOST  host (por defecto 127.0.0.1)
 """
@@ -28,6 +29,7 @@ El servidor ya debe estar corriendo (lo arranca el workflow de CI) con
 import json
 import os
 import sys
+import threading
 import time
 import unittest
 
@@ -38,6 +40,7 @@ HOST = os.environ.get("MR_SERVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MR_SERVER_PORT", "30899"))
 BINARY = os.environ.get("MR_SERVER_BIN", "")
 LOG = os.environ.get("MR_SERVER_LOG", "")
+SERVER_PID = int(os.environ.get("MR_SERVER_PID", "0"))
 
 STARTED_LINE = "ALL SYSTEMS STARTED SUCCESSFULLY"
 STARTUP_TIMEOUT_S = 20.0
@@ -54,6 +57,25 @@ BACKEND_HOSTS = (
 def read_log():
     with open(LOG, "r", encoding="utf-8", errors="replace") as handle:
         return handle.read()
+
+
+def server_alive():
+    """El proceso existe (si se conoce su PID) y responde a `I`."""
+    if SERVER_PID:
+        try:
+            os.kill(SERVER_PID, 0)
+        except OSError:
+            return False
+    try:
+        sock = mrclient.connect(HOST, PORT)
+        try:
+            sock.sendall(b"I")
+            mrclient.recv_packet(sock)
+        finally:
+            sock.close()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def wait_for_log(needle, timeout):
@@ -86,6 +108,47 @@ class NoBackendTests(unittest.TestCase):
             self.assertIn(key, info)
         self.assertEqual(info["clientversion"], "1.0.0")
         self.assertNotIn("uuid", info)
+
+    def test_info_query_concurrent(self):
+        # Regresion de humo: no puede probar la ausencia de carreras; la
+        # garantia es el mutex de THeartbeatThread. Abarca >= 2 refrescos (5 s).
+        wait_for_log(STARTED_LINE, STARTUP_TIMEOUT_S)
+        required = ("players", "maxplayers", "map", "name", "version", "clientversion")
+        duration_s = 12.0
+        deadline = time.monotonic() + duration_s
+        ok_counts = [0] * 4
+        failures = []
+        lock = threading.Lock()
+
+        def worker(index):
+            while time.monotonic() < deadline:
+                try:
+                    sock = mrclient.connect(HOST, PORT)
+                    try:
+                        sock.sendall(b"I")
+                        info = json.loads(mrclient.recv_packet(sock).decode("utf-8"))
+                    finally:
+                        sock.close()
+                    for key in required:
+                        if key not in info:
+                            raise AssertionError("falta la clave " + key)
+                    if "uuid" in info:
+                        raise AssertionError("uuid presente")
+                    ok_counts[index] += 1
+                except Exception as exc:  # noqa: BLE001
+                    with lock:
+                        failures.append(repr(exc))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(failures, [])
+        self.assertGreater(sum(ok_counts), 0)
+        self.assertTrue(server_alive(), "el servidor murio durante la prueba")
+        print("test_info_query_concurrent: %d respuestas correctas" % sum(ok_counts))
 
     def test_no_backend_hosts_in_binary(self):
         self.assertTrue(BINARY, "MR_SERVER_BIN no esta definida")

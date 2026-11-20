@@ -326,7 +326,7 @@ void TNetwork::Identify(TConnection&& RawConnection, TConnectionLimiter::TGuard&
             boost::asio::write(RawConnection.Socket, boost::asio::buffer("P"), ec);
             return;
         } else if (Code == 'I') {
-            const std::string Data = Application::Settings.getAsBool(Settings::Key::General_InformationPacket) ? THeartbeatThread::lastCall : "";
+            const std::string Data = Application::Settings.getAsBool(Settings::Key::General_InformationPacket) ? THeartbeatThread::GetLastCall() : "";
 
             const auto Size = static_cast<int32_t>(Data.size());
             std::vector<uint8_t> ToSend;

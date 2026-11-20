@@ -22,6 +22,8 @@
 #include "IThreaded.h"
 #include "TResourceManager.h"
 #include "TServer.h"
+#include <mutex>
+#include <string>
 
 class THeartbeatThread : public IThreaded {
 public:
@@ -29,8 +31,14 @@ public:
     //~THeartbeatThread();
     void operator()() override;
 
-    static inline std::string lastCall = "";
+    // Copy of the latest information packet body, taken under the lock.
+    static std::string GetLastCall();
+
 private:
+    static void SetLastCall(std::string Value);
+    static inline std::mutex sLastCallMutex {};
+    static inline std::string sLastCall {};
+
     void GenerateCall();
     std::string GetPlayers();
 

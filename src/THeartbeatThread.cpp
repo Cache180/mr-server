@@ -27,13 +27,13 @@
 // MR Server does not talk to any backend. This thread is kept because
 // - the "Heartbeat" subsystem must become Good for the server to finish starting
 //   (joins are refused while "Main" is still Starting), and
-// - it keeps `lastCall` fresh, which is the body of the information packet (`I` query).
+// - it keeps the information packet body fresh, which is the body of the information packet (`I` query).
 void THeartbeatThread::operator()() {
     RegisterThread("Heartbeat");
     constexpr auto RefreshInterval = std::chrono::seconds(5);
     constexpr auto PollInterval = std::chrono::milliseconds(100);
 
-    // lastCall must be filled before anyone can be served an `I` query.
+    // The information packet body must be filled before anyone can be served an `I` query.
     GenerateCall();
     Application::SetSubsystemStatus("Heartbeat", Application::Status::Good);
 
@@ -67,7 +67,17 @@ void THeartbeatThread::GenerateCall() {
         { "desc", Application::Settings.getAsString(Settings::Key::General_Description) }
     };
 
-    lastCall = Ret.dump();
+    SetLastCall(Ret.dump());
+}
+
+std::string THeartbeatThread::GetLastCall() {
+    std::lock_guard Lock(sLastCallMutex);
+    return sLastCall;
+}
+
+void THeartbeatThread::SetLastCall(std::string Value) {
+    std::lock_guard Lock(sLastCallMutex);
+    sLastCall = std::move(Value);
 }
 THeartbeatThread::THeartbeatThread(TResourceManager& ResourceManager, TServer& Server)
     : mResourceManager(ResourceManager)
