@@ -3,8 +3,7 @@ name: Linux
 on:
   push:
     branches:
-      - "develop"
-      - "minor"
+      - "mr-main"
   pull_request:
 
 env:
