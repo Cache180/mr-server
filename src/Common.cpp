@@ -74,12 +74,12 @@ std::string Application::ServerVersionString() {
 }
 
 std::array<uint8_t, 3> Application::VersionStrToInts(const std::string& str) {
-    std::array<uint8_t, 3> Version;
+    std::array<uint8_t, 3> Version {}; // en cero: una parte no numerica no deja basura
     std::stringstream ss(str);
     for (uint8_t& i : Version) {
         std::string Part;
         std::getline(ss, Part, '.');
-        std::from_chars(&*Part.begin(), &*Part.begin() + Part.size(), i);
+        std::from_chars(Part.data(), Part.data() + Part.size(), i);
     }
     return Version;
 }
@@ -99,6 +99,17 @@ TEST_CASE("Application::VersionStrToInts") {
     CHECK(v[0] == 100);
     CHECK(v[1] == 200);
     CHECK(v[2] == 255);
+}
+
+TEST_CASE("Application::VersionStrToInts (not numeric)") {
+    // Una parte no numerica queda en 0 (antes quedaba sin inicializar).
+    auto v = Application::VersionStrToInts("abc.1.0");
+    CHECK(v[0] == 0);
+    CHECK(v[1] == 1);
+    CHECK(v[2] == 0);
+    v = Application::VersionStrToInts(".0");
+    CHECK(v[0] == 0);
+    CHECK(v[2] == 0);
 }
 
 bool Application::IsOutdated(const Version& Current, const Version& Newest) {

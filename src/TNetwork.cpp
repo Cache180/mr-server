@@ -27,6 +27,7 @@
 #include "nlohmann/json.hpp"
 #include <CustomAssert.h>
 #include <Http.h>
+#include <algorithm>
 #include <array>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/ip/address.hpp>
@@ -364,14 +365,18 @@ std::string HashPassword(const std::string& str) {
 
 std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     auto Client = CreateClient(std::move(RawConnection.Socket));
+    // El server puede escucharse solo en IPv4 (p. ej. IP = "127.0.0.1"): to_v6() lanzaria
+    // bad_address_cast, asi que solo se convierte si la direccion es realmente IPv6.
+    const auto PeerAddress = RawConnection.SockAddr.address();
+    const bool IsV4Mapped = PeerAddress.is_v6() && PeerAddress.to_v6().is_v4_mapped();
     std::string ip = "";
-    if (RawConnection.SockAddr.address().to_v6().is_v4_mapped()) {
-        ip = boost::asio::ip::make_address_v4(ip::v4_mapped_t::v4_mapped, RawConnection.SockAddr.address().to_v6()).to_string();
+    if (IsV4Mapped) {
+        ip = boost::asio::ip::make_address_v4(ip::v4_mapped_t::v4_mapped, PeerAddress.to_v6()).to_string();
     } else {
-        ip = RawConnection.SockAddr.address().to_string();
+        ip = PeerAddress.to_string();
     }
     Client->SetIdentifier("ip", ip);
-    beammp_tracef("This thread is ip {} ({})", ip, RawConnection.SockAddr.address().to_v6().is_v4_mapped() ? "IPv4 mapped IPv6" : "IPv6");
+    beammp_tracef("This thread is ip {} ({})", ip, IsV4Mapped ? "IPv4 mapped IPv6" : (PeerAddress.is_v6() ? "IPv6" : "IPv4"));
 
     if (Application::GetSubsystemStatuses().at("Main") == Application::Status::Starting) {
         ClientKick(*Client, "The server is still starting, please try joining again later.");
@@ -387,19 +392,7 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         return nullptr;
     }
 
-    constexpr std::string_view VC = "VC";
-    if (Data.size() > 3 && std::equal(Data.begin(), Data.begin() + VC.size(), VC.begin(), VC.end())) {
-        std::string ClientVersionStr(reinterpret_cast<const char*>(Data.data() + 2), Data.size() - 2);
-        Version ClientVersion = Application::VersionStrToInts(ClientVersionStr + ".0");
-        Version MinClientVersion = Application::ClientMinimumVersion();
-        if (Application::IsOutdated(ClientVersion, MinClientVersion)) {
-            beammp_errorf("Client tried to connect with version '{}', but only versions >= {} are allowed",
-                ClientVersion.AsString(), MinClientVersion.AsString());
-            ClientKick(*Client, fmt::format("Outdated version, launcher version >={} required to join!", MinClientVersion.AsString()));
-            return nullptr;
-        }
-    } else {
-        ClientKick(*Client, fmt::format("Invalid version header: '{}' ({})", std::string(reinterpret_cast<const char*>(Data.data()), Data.size()), Data.size()));
+    if (!AcceptLauncherHeader(*Client, Data)) {
         return nullptr;
     }
 
@@ -407,91 +400,41 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         // TODO: handle
     }
 
-    Data = TCPRcv(*Client, true);
-    if (Data.empty()) {
-        beammp_debug("Authentication failed: did not receive auth key packet");
-        ClientKick(*Client, "Connection closed during authentication");
+    auto MaybeIdentity = ReceiveIdentity(*Client);
+    if (!MaybeIdentity.has_value()) {
         return nullptr;
     }
+    const MR::Identity& Identity = *MaybeIdentity;
 
-    if (Data.size() > 50) {
-        ClientKick(*Client, "Invalid Key (too long)!");
+    // Reserva el nombre mientras dura la autenticacion (ver mPendingNames). Se
+    // libera justo despues de InsertClient, antes de TCPClient (que dura toda la sesion).
+    if (!TryReservePilotName(Identity)) {
+        ClientKick(*Client, std::string(MR::KickNameInUse));
         return nullptr;
     }
-
-    std::string Key(reinterpret_cast<const char*>(Data.data()), Data.size());
-    if (Key.empty()) {
-        ClientKick(*Client, "Invalid Key (empty)!");
-        return nullptr;
-    }
-    std::string AuthKey = Application::Settings.getAsString(Settings::Key::General_AuthKey);
-    std::string ClientIp = Client->GetIdentifiers().at("ip");
-
-    nlohmann::json AuthReq { };
-    std::string AuthResStr { };
-    try {
-        AuthReq = nlohmann::json {
-            { "key", Key },
-            { "auth_key", AuthKey },
-            { "client_ip", ClientIp }
-        };
-
-        // MR: el backend de autenticacion de BeamMP ya no existe. La identificacion
-        // MR (handshake `MR`) reemplaza este bloque; mientras tanto no se admite a nadie.
-        ClientKick(*Client, "Autenticacion MR no disponible todavia");
-        return nullptr;
-
-    } catch (const std::exception& e) {
-        beammp_debugf("Invalid json sent by client, kicking: {}", e.what());
-        ClientKick(*Client, "Invalid Key (invalid UTF8 string)!");
-        return nullptr;
-    }
-
-    beammp_debug("Response from authentication backend: " + AuthResStr);
-
-    try {
-        nlohmann::json AuthRes = nlohmann::json::parse(AuthResStr);
-
-        if (AuthRes["username"].is_string() && AuthRes["username"].size() > 0 && AuthRes["roles"].is_string()
-            && AuthRes["guest"].is_boolean() && AuthRes["identifiers"].is_array()) {
-
-            Client->SetName(AuthRes["username"]);
-            Client->SetRoles(AuthRes["roles"]);
-            Client->SetIsGuest(AuthRes["guest"]);
-            for (const auto& ID : AuthRes["identifiers"]) {
-                auto Raw = std::string(ID);
-                auto SepIndex = Raw.find(':');
-                Client->SetIdentifier(Raw.substr(0, SepIndex), Raw.substr(SepIndex + 1));
+    struct NameReservation {
+        TNetwork& Network;
+        const MR::Identity& Id;
+        bool Held = true;
+        void Release() {
+            if (Held) {
+                Held = false;
+                Network.ReleasePilotName(Id);
             }
-        } else {
-            beammp_error("Invalid authentication data received from authentication backend");
-            ClientKick(*Client, "Invalid authentication data!");
-            return nullptr;
         }
-    } catch (const std::exception& e) {
-        beammp_errorf("Client sent invalid key. Error was: {}", e.what());
-        // TODO: we should really clarify that this was a backend response or parsing error
-        ClientKick(*Client, "Invalid key! Please restart your game.");
-        return nullptr;
-    }
+        ~NameReservation() { Release(); }
+    } Reservation { *this, Identity };
+
+    Client->SetName(Identity.Name);
+    Client->SetRoles("USER");
+    Client->SetIsGuest(false);
+    Client->SetIdentifier("mr", Identity.MrId);
 
     beammp_debug("Name -> " + Client->GetName() + ", Guest -> " + std::to_string(Client->IsGuest()) + ", Roles -> " + Client->GetRoles());
-    mServer.ForEachClient([&](const std::weak_ptr<TClient>& ClientPtr) -> bool {
-        std::shared_ptr<TClient> Cl;
-        {
-            ReadLock Lock(mServer.GetClientMutex());
-            if (auto Locked = ClientPtr.lock()) {
-                Cl = std::move(Locked);
-            } else
-                return true;
-        }
-        if (Cl->GetName() == Client->GetName() && Cl->IsGuest() == Client->IsGuest()) {
-            DisconnectClient(Cl, "Stale Client (not a real player)");
-            return false;
-        }
-
-        return true;
-    });
+    if (!ResolveNameClash(Identity)) {
+        ClientKick(*Client, std::string(MR::KickNameInUse));
+        return nullptr;
+    }
 
     auto Futures = LuaAPI::MP::Engine->TriggerEvent("onPlayerAuth", "", Client->GetName(), Client->GetRoles(), Client->IsGuest(), Client->GetIdentifiers());
     TLuaEngine::WaitForAll(Futures);
@@ -551,10 +494,115 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     if (!NotAllowed && !NotAllowedWithReason) {
         beammp_info("Identification success");
         mServer.InsertClient(Client);
+        Reservation.Release(); // ya figura en la lista de clientes
         TCPClient(Client);
     }
 
     return Client;
+}
+
+bool TNetwork::AcceptLauncherHeader(TClient& Client, const std::vector<uint8_t>& Header) {
+    constexpr std::string_view Prefix = "MR";
+    constexpr size_t MaxHeaderBytes = 32; // `MR` + version: nada razonable es mas largo
+    const std::string_view Raw(reinterpret_cast<const char*>(Header.data()), Header.size());
+    if (Raw.size() <= Prefix.size() || Raw.size() > MaxHeaderBytes || Raw.substr(0, Prefix.size()) != Prefix) {
+        // La cabecera cruda no se registra: viene de un cliente sin autenticar.
+        ClientKick(Client, std::string(MR::KickWrongLauncher));
+        return false;
+    }
+    const std::string VersionStr(Raw.substr(Prefix.size()));
+    Version ClientVersion = Application::VersionStrToInts(VersionStr + ".0");
+    Version MinClientVersion = Application::ClientMinimumVersion();
+    if (Application::IsOutdated(ClientVersion, MinClientVersion)) {
+        beammp_errorf("Client tried to connect with launcher version '{}', but only versions >= {} are allowed",
+            ClientVersion.AsString(), MinClientVersion.AsString());
+        ClientKick(Client, MR::KickOutdated(MinClientVersion));
+        return false;
+    }
+    return true;
+}
+
+std::optional<MR::Identity> TNetwork::ReceiveIdentity(TClient& Client) {
+    // TCPRcv acota el paquete de un cliente sin autenticar (4096 bytes) y lo lee
+    // con timeout (READ_TIMEOUT_S), asi que un cliente mudo no bloquea a nadie.
+    const auto Data = TCPRcv(Client, true);
+    if (Data.empty()) {
+        beammp_debug("Authentication failed: did not receive identity packet");
+        ClientKick(Client, "Connection closed during authentication");
+        return std::nullopt;
+    }
+
+    // Vista sobre el buffer recibido, sin copiarlo: el parser rechaza > 256 bytes
+    // antes de tocar el contenido. Claves JSON adicionales se aceptan a proposito
+    // (compatibilidad hacia adelante).
+    std::string Reason;
+    auto Parsed = MR::ParseIdentityPacket(std::string_view(reinterpret_cast<const char*>(Data.data()), Data.size()), Reason);
+    if (!Parsed.has_value()) {
+        ClientKick(Client, MR::KickBadIdentity(Reason));
+        return std::nullopt;
+    }
+    if (Parsed->MrId.empty()) { // DeriveMrId fallo: nunca se trata como coincidencia
+        ClientKick(Client, MR::KickBadIdentity("instalacion invalida"));
+        return std::nullopt;
+    }
+    return Parsed;
+}
+
+bool TNetwork::TryReservePilotName(const MR::Identity& Id) {
+    std::lock_guard Lock(mPendingNamesMutex);
+    for (const auto& [Name, MrId] : mPendingNames) {
+        if (MR::ClassifyNameClash(Id.Name, Id.MrId, Name, MrId) != MR::NameClash::None) {
+            return false;
+        }
+    }
+    mPendingNames.emplace_back(Id.Name, Id.MrId);
+    return true;
+}
+
+void TNetwork::ReleasePilotName(const MR::Identity& Id) {
+    std::lock_guard Lock(mPendingNamesMutex);
+    auto It = std::find(mPendingNames.begin(), mPendingNames.end(), std::make_pair(Id.Name, Id.MrId));
+    if (It != mPendingNames.end()) {
+        mPendingNames.erase(It);
+    }
+}
+
+bool TNetwork::ResolveNameClash(const MR::Identity& Id) {
+    std::vector<std::shared_ptr<TClient>> SameInstall;
+    bool OtherInstall = false;
+    mServer.ForEachClient([&](const std::weak_ptr<TClient>& ClientPtr) -> bool {
+        std::shared_ptr<TClient> Cl;
+        {
+            ReadLock Lock(mServer.GetClientMutex());
+            if (auto Locked = ClientPtr.lock()) {
+                Cl = std::move(Locked);
+            } else
+                return true;
+        }
+        const auto& Identifiers = Cl->GetIdentifiers();
+        const auto MrIt = Identifiers.find("mr");
+        const std::string ExistingMrId = MrIt != Identifiers.end() ? MrIt->second : std::string();
+        switch (MR::ClassifyNameClash(Id.Name, Id.MrId, Cl->GetName(), ExistingMrId)) {
+        case MR::NameClash::OtherInstall:
+            OtherInstall = true;
+            return false;
+        case MR::NameClash::SameInstall:
+            SameInstall.push_back(std::move(Cl));
+            return true;
+        case MR::NameClash::None:
+            break;
+        }
+        return true;
+    });
+    if (OtherInstall) {
+        return false;
+    }
+    // Misma instalacion: el cliente nuevo reemplaza al viejo (reconexion). Se
+    // desconecta fuera del scan, sin mantener el mutex de clientes.
+    for (const auto& Old : SameInstall) {
+        DisconnectClient(*Old, "Stale Client (replaced by a new connection of the same install)");
+    }
+    return true;
 }
 
 std::shared_ptr<TClient> TNetwork::CreateClient(boost::asio::ip::tcp::socket&& TCPSock) {

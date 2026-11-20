@@ -20,6 +20,7 @@
 
 #include "BoostAliases.h"
 #include "Compat.h"
+#include "MRIdentity.h"
 #include "TConnectionLimiter.h"
 #include "TResourceManager.h"
 #include "TServer.h"
@@ -64,6 +65,21 @@ private:
     std::thread mTCPThread;
     std::mutex mOpenIDMutex;
     TConnectionLimiter mConnectionLimiter;
+    // Nombres de piloto de clientes que estan autenticandose: aun no estan en la
+    // lista de TServer, asi que sin esto dos entradas simultaneas con el mismo
+    // nombre no se verian entre si. Pares (nombre, MrId) bajo mPendingNamesMutex.
+    std::mutex mPendingNamesMutex;
+    std::vector<std::pair<std::string, std::string>> mPendingNames;
+
+    // Autenticacion MR (ver TNetwork::Authentication). Las dos primeras expulsan
+    // al cliente y devuelven false/nullopt si el paquete no es valido.
+    bool AcceptLauncherHeader(TClient& Client, const std::vector<uint8_t>& Header);
+    std::optional<MR::Identity> ReceiveIdentity(TClient& Client);
+    bool TryReservePilotName(const MR::Identity& Id);
+    void ReleasePilotName(const MR::Identity& Id);
+    // false: el nombre lo usa otra instalacion y hay que expulsar al nuevo.
+    // Si es la misma instalacion, desconecta la sesion vieja (como el "Stale Client" de upstream).
+    bool ResolveNameClash(const MR::Identity& Id);
 
     std::vector<uint8_t> UDPRcvFromClient(boost::asio::ip::udp::endpoint& ClientEndpoint);
     void OnConnect(const std::weak_ptr<TClient>& c);
