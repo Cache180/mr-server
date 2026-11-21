@@ -134,6 +134,18 @@ class QueueHardCapTests(unittest.TestCase):
                 continue
         self.fail("%s sigue conectado: el servidor no cerro la conexion" % who)
 
+    def assert_owner_disconnected(self, name):
+        """El hilo dueno del socket llego a OnDisconnect (escribe `<name> Connection Terminated`).
+
+        El tope duro lo marca el hilo productor (aviso + shutdown), pero solo el hilo
+        dueno del socket ejecuta OnDisconnect: sin su linea, nadie cerro al cliente.
+        """
+        line = "%s Connection Terminated" % name
+        deadline = time.monotonic() + 10.0
+        while line not in read_log() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertIn(line, read_log(), "%s: el hilo dueno no desconecto al cliente" % name)
+
     def test_player_list_flood_disconnects_client(self):
         spammer, _ = self.pilot(SPAMMER, rcvbuf=4096)  # nunca lee
         reader, _ = self.pilot(READER)
@@ -171,6 +183,7 @@ class QueueHardCapTests(unittest.TestCase):
               % (sent, elapsed, peak_kb - rss_before_kb))
         self.assertEqual(len(lines), 1, "se esperaba una linea de log con '%s': %r" % (OVERFLOW_PHRASE, lines))
         self.assert_closed_by_server(spammer, SPAMMER)
+        self.assert_owner_disconnected(SPAMMER)
 
         peak_kb = max(peak_kb, server_rss_kb())
         self.assertLess(peak_kb - rss_before_kb, RSS_LIMIT_KB,
@@ -209,6 +222,7 @@ class QueueHardCapTests(unittest.TestCase):
               % (sent, N_PAYLOAD_BYTES // 1024, elapsed, peak_kb - rss_before_kb))
         self.assertEqual(len(lines), 1, "se esperaba una linea de log con '%s': %r" % (OVERFLOW_PHRASE, lines))
         self.assert_closed_by_server(victim, N_VICTIM)
+        self.assert_owner_disconnected(N_VICTIM)
 
         peak_kb = max(peak_kb, server_rss_kb())
         self.assertLess(peak_kb - rss_before_kb, RSS_LIMIT_KB,
