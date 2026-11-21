@@ -28,6 +28,7 @@ El servidor ya debe estar corriendo (lo arranca el workflow de CI) con
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -161,6 +162,41 @@ class NoBackendTests(unittest.TestCase):
         text = wait_for_log("basado en BeamMP-Server, AGPL-3.0", STARTUP_TIMEOUT_S)
         self.assertIn("MR Server", text)
         self.assertIn("basado en BeamMP-Server, AGPL-3.0", text)
+
+
+AUTHKEY_VALUE = "clave-de-prueba-no-real"
+
+
+class AuthKeyPreservedTests(unittest.TestCase):
+    """Segundo arranque del servidor con `ServerConfig.authkey.toml`.
+
+    El workflow arranca una segunda instancia (otro directorio y puerto), la
+    detiene con SIGINT y despues lanza esta clase, que solo mira los archivos:
+
+        MR_AUTHKEY_LOG     log de la segunda instancia
+        MR_AUTHKEY_CONFIG  ServerConfig.toml de la segunda instancia (ya parada)
+
+    Se ejecuta sola (`test_nobackend.py AuthKeyPreservedTests`): no hace falta
+    el servidor de la primera instancia.
+    """
+
+    def test_authkey_preserved(self):
+        log_path = os.environ.get("MR_AUTHKEY_LOG", "")
+        config_path = os.environ.get("MR_AUTHKEY_CONFIG", "")
+        self.assertTrue(log_path and config_path, "faltan MR_AUTHKEY_LOG y MR_AUTHKEY_CONFIG")
+        with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+            log = handle.read()
+        with open(config_path, "r", encoding="utf-8") as handle:
+            config = handle.read()
+
+        # el servidor arranco con una AuthKey presente
+        self.assertIn(STARTED_LINE, log)
+        # el valor sigue intacto en el toml (el servidor reescribe el archivo al arrancar)
+        lines = [line for line in config.splitlines() if line.strip().startswith("AuthKey")]
+        self.assertEqual(len(lines), 1, "AuthKey debe aparecer una sola vez: %r" % (lines,))
+        self.assertRegex(lines[0], r"""^AuthKey\s*=\s*["']%s["']\s*$""" % re.escape(AUTHKEY_VALUE))
+        # y nunca se escribe en el log
+        self.assertNotIn(AUTHKEY_VALUE, log)
 
 
 if __name__ == "__main__":

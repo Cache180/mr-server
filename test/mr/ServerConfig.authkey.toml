@@ -1,0 +1,28 @@
+# MR Server, a BeamMP-Server fork for Muertazos Racing.
+# Copyright (C) 2026 Muertazos Racing
+# Licensed under AGPL-3.0-or-later, see the LICENSE file.
+#
+# Configuracion para la prueba test_authkey_preserved: igual que la de CI pero
+# con una AuthKey (valor de prueba, no es una clave real), puerto propio y
+# Debug activo para que el log sea lo mas verboso posible.
+
+[General]
+AuthKey = "clave-de-prueba-no-real"
+LogChat = false
+Debug = true
+Private = true
+InformationPacket = true
+AllowGuests = true
+IP = "127.0.0.1"
+Port = 30898
+Name = "MR CI Server AuthKey"
+Tags = "Freeroam"
+MaxCars = 1
+MaxPlayers = 4
+Map = "/levels/gridmap_v2/info.json"
+Description = "MR Server CI"
+ResourceFolder = "Resources"
+
+[Misc]
+ImScaredOfUpdates = true
+UpdateReminderTime = "30s"

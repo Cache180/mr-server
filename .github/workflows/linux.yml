@@ -120,7 +120,7 @@ jobs:
           RC=0
           RC_HANDSHAKE=0
           MR_SERVER_BIN="$BIN" MR_SERVER_LOG="$WORK/server.log" MR_SERVER_PORT=30899 MR_SERVER_PID="$SERVER_PID" \
-            python3 test/mr/test_nobackend.py -v || RC=$?
+            python3 test/mr/test_nobackend.py NoBackendTests -v || RC=$?
 
           # Misma instancia del server: cada prueba usa su propio nombre de piloto y cierra sus sockets.
           MR_SERVER_PORT=30899 python3 test/mr/test_handshake.py -v || RC_HANDSHAKE=$?
@@ -129,6 +129,11 @@ jobs:
           RC_TRANSPORT=0
           MR_SERVER_LOG="$WORK/server.log" MR_SERVER_PID="$SERVER_PID" MR_SERVER_PORT=30899 python3 test/mr/test_transport.py -v || RC_TRANSPORT=$?
           if [ "$RC" -eq 0 ]; then RC=$RC_TRANSPORT; fi
+
+          # Tope duro de la cola de envio: inunda al server (hasta ~100 MB de trafico de prueba)
+          RC_LIMITS=0
+          MR_SERVER_LOG="$WORK/server.log" MR_SERVER_PID="$SERVER_PID" MR_SERVER_PORT=30899 python3 test/mr/test_limits.py -v || RC_LIMITS=$?
+          if [ "$RC" -eq 0 ]; then RC=$RC_LIMITS; fi
 
           kill -INT "$SERVER_PID" 2>/dev/null
           for _ in $(seq 1 40); do
@@ -142,9 +147,38 @@ jobs:
             echo "Server exited cleanly after SIGINT"
           fi
 
+          # Segundo arranque, con AuthKey (otro directorio y puerto): el server arranca, se
+          # detiene, y la prueba comprueba que el toml conserva el valor y que el log no lo contiene.
+          WORK2="$(mktemp -d)"
+          cp test/mr/ServerConfig.authkey.toml "$WORK2/ServerConfig.toml"
+          mkfifo "$WORK2/stdin"
+          exec 4<>"$WORK2/stdin"
+          (cd "$WORK2" && exec "$BIN" <&4 >"$WORK2/server.log" 2>&1) &
+          SERVER2_PID=$!
+          for _ in $(seq 1 100); do
+            grep -q "ALL SYSTEMS STARTED SUCCESSFULLY" "$WORK2/server.log" && break
+            kill -0 "$SERVER2_PID" 2>/dev/null || break
+            sleep 0.25
+          done
+          kill -INT "$SERVER2_PID" 2>/dev/null
+          for _ in $(seq 1 40); do
+            kill -0 "$SERVER2_PID" 2>/dev/null || break
+            sleep 0.25
+          done
+          if kill -0 "$SERVER2_PID" 2>/dev/null; then
+            echo "::warning::second server did not exit within 10s after SIGINT, killing"
+            kill -KILL "$SERVER2_PID" 2>/dev/null
+          fi
+          RC_AUTHKEY=0
+          MR_AUTHKEY_LOG="$WORK2/server.log" MR_AUTHKEY_CONFIG="$WORK2/ServerConfig.toml" \
+            python3 test/mr/test_nobackend.py AuthKeyPreservedTests -v || RC_AUTHKEY=$?
+          if [ "$RC" -eq 0 ]; then RC=$RC_AUTHKEY; fi
+
           if [ "$RC" -ne 0 ]; then
             echo "===== server log ====="
             cat "$WORK/server.log"
+            echo "===== second server log (AuthKey) ====="
+            cat "$WORK2/server.log"
           fi
           exit "$RC"
 

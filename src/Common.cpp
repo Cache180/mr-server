@@ -427,3 +427,30 @@ std::vector<uint8_t> Comp(std::span<const uint8_t> input) {
     output.resize(output_size);
     return output;
 }
+
+TEST_CASE("DeComp round-trips 1 MiB of zeros") {
+    const std::vector<uint8_t> Zeros(1024 * 1024, 0);
+    const auto Packed = Comp(Zeros);
+    CHECK(Packed.size() < 4096);
+    const auto Unpacked = DeComp(Packed);
+    CHECK(Unpacked.size() == Zeros.size());
+    CHECK(Unpacked == Zeros);
+}
+
+TEST_CASE("DeComp accepts exactly the maximum and rejects anything larger") {
+    // The limit is on the decompressed size, whatever the compression ratio.
+    const std::vector<uint8_t> AtLimit(MAX_DECOMPRESSION_BUFFER_SIZE, 0);
+    CHECK(DeComp(Comp(AtLimit)).size() == AtLimit.size());
+
+    const std::vector<uint8_t> OverLimit(MAX_DECOMPRESSION_BUFFER_SIZE + 1, 0);
+    CHECK_THROWS_AS(DeComp(Comp(OverLimit)), std::runtime_error);
+}
+
+TEST_CASE("DeComp rejects empty, truncated and garbage input without looping") {
+    CHECK_THROWS(DeComp(std::span<const uint8_t> {}));
+    const std::vector<uint8_t> Garbage { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02 };
+    CHECK_THROWS(DeComp(Garbage));
+    auto Packed = Comp(std::vector<uint8_t>(64 * 1024, 7));
+    Packed.resize(Packed.size() / 2);
+    CHECK_THROWS(DeComp(Packed));
+}

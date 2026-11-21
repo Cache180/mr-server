@@ -32,6 +32,7 @@ import re
 import sys
 import time
 import unittest
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mrclient  # noqa: E402
@@ -84,6 +85,50 @@ class HandshakeTests(unittest.TestCase):
         ok, reply = mrclient.handshake(self.open(), "MR0.9", identity("CiViejo", INSTALL_A))
         self.assertFalse(ok)
         self.assert_kicked(reply, KICK_OUTDATED)
+
+    def test_bare_mr_header(self):
+        # `MR` sin version: es un launcher MR (roto o viejo), no uno "equivocado"
+        ok, reply = mrclient.handshake(self.open(), "MR", identity("CiSinVersion", INSTALL_A))
+        self.assertFalse(ok)
+        self.assert_kicked(reply, KICK_OUTDATED)
+        self.assert_kicked(reply, "se requiere la version >= 1.0.0")
+
+    def test_oversized_mr_header(self):
+        ok, reply = mrclient.handshake(self.open(), "MR1." + "0" * 40, identity("CiCabeceraLarga", INSTALL_A))
+        self.assertFalse(ok)
+        self.assert_kicked(reply, KICK_OUTDATED)
+
+    def accept_header_only(self):
+        """Saluda con `MR1.0` y espera `A`: el cliente queda sin nombre (sin autenticar)."""
+        sock = self.open()
+        sock.sendall(b"C")
+        mrclient.send_packet(sock, b"MR1.0")
+        self.assertEqual(mrclient.recv_packet(sock), b"A")
+        return sock
+
+    def assert_other_client_accepted(self, name):
+        ok, reply = mrclient.handshake(self.open(), "MR1.0", identity(name, INSTALL_B))
+        self.assertTrue(ok, "el servidor dejo de aceptar clientes: %r" % (reply,))
+
+    def test_compressed_packet_before_auth_rejected(self):
+        sock = self.accept_header_only()
+        mrclient.send_packet(sock, b"ABG:" + zlib.compress(b"\x00" * 4096))
+        self.assert_kicked(mrclient.recv_packet(sock), "Identidad invalida: formato invalido")
+        self.assert_other_client_accepted("CiTrasZip")
+
+    def test_compressed_valid_identity_before_auth_rejected(self):
+        # Una identidad valida pero comprimida tampoco se descomprime antes de autenticar.
+        sock = self.accept_header_only()
+        mrclient.send_packet(sock, b"ABG:" + zlib.compress(identity("CiComprimido", INSTALL_A)))
+        self.assert_kicked(mrclient.recv_packet(sock), "Identidad invalida: formato invalido")
+        self.assert_other_client_accepted("CiTrasZip2")
+
+    def test_compressed_header_rejected(self):
+        sock = self.open()
+        sock.sendall(b"C")
+        mrclient.send_packet(sock, b"ABG:" + zlib.compress(b"MR1.0"))
+        self.assert_kicked(mrclient.recv_packet(sock), "Identidad invalida: formato invalido")
+        self.assert_other_client_accepted("CiTrasZip3")
 
     def test_valid_identity_accepted(self):
         ok, reply = mrclient.handshake(self.open(), "MR1.0", identity("CiPiloto", INSTALL_A))
