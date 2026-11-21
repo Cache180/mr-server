@@ -70,11 +70,10 @@ class HandshakeTests(unittest.TestCase):
 
     def assert_still_in_server(self, sock):
         """El servidor sigue atendiendo a este cliente: tras `Done` envia `U` y `M`."""
-        mrclient.send_packet(sock, b"Done")
-        magic = mrclient.recv_packet(sock)
-        self.assertEqual(magic[:1], b"U", "esperaba el paquete U, llego %r" % (magic[:16],))
-        map_packet = mrclient.recv_packet(sock)
-        self.assertEqual(map_packet[:1], b"M", "esperaba el paquete M, llego %r" % (map_packet[:16],))
+        try:
+            mrclient.complete_resources(sock)
+        except mrclient.ProtocolError as err:
+            self.fail(str(err))
 
     def test_official_header_rejected(self):
         ok, reply = mrclient.handshake(self.open(), "VC2.8", identity("CiOficial", INSTALL_A))
