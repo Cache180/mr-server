@@ -117,7 +117,9 @@ class NoBackendTests(unittest.TestCase):
         required = ("players", "maxplayers", "map", "name", "version", "clientversion")
         duration_s = 12.0
         deadline = time.monotonic() + duration_s
-        ok_counts = [0] * 4
+        # 3 consultas simultaneas = MAX_PREAUTH_PER_IP: la cuarta conexion previa a la autenticacion se rechaza
+        workers = 3
+        ok_counts = [0] * workers
         failures = []
         lock = threading.Lock()
 
@@ -140,7 +142,7 @@ class NoBackendTests(unittest.TestCase):
                     with lock:
                         failures.append(repr(exc))
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
         for thread in threads:
             thread.start()
         for thread in threads:
