@@ -157,8 +157,10 @@ def collect(sock, duration):
     return seen
 
 
-def join(host, port, name, install, header="MR1.0", timeout=5.0, rcvbuf=None):
+def join(host, port, name, install, header="MR1.0", timeout=5.0, rcvbuf=None, ft_before_h=False):
     """Entra como `name` y deja la sesion sincronizada. Devuelve `(sock, pid)`.
+
+    Con `ft_before_h` manda `Ft` justo antes de `H` (modo forzado del launcher).
 
     Hace lo que un launcher: saludo, identidad, `Done`, `H` y espera `Sn`. Un
     `p` posterior confirma que el servidor termino de sincronizarnos: su
@@ -171,6 +173,8 @@ def join(host, port, name, install, header="MR1.0", timeout=5.0, rcvbuf=None):
             raise ProtocolError("no aceptado: %r" % (reply,))
         pid = int(reply[1:])
         _MAGIC_BY_PID[pid] = complete_resources(sock, timeout)
+        if ft_before_h:
+            send_packet(sock, b"Ft")
         send_packet(sock, b"H")
         if recv_until(sock, lambda packet: packet[:2] == b"Sn", timeout) is None:
             raise ProtocolError("el servidor no envio Sn tras H")

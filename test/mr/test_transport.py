@@ -122,9 +122,9 @@ class TransportTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(LOG, "MR_SERVER_LOG no esta definido")
 
-    def pilot(self, name, udp=True, rcvbuf=None):
+    def pilot(self, name, udp=True, rcvbuf=None, ft_before_h=False):
         """Entra como `name` (sincronizado); con `udp` abre ademas el canal UDP."""
-        sock, pid = mrclient.join(HOST, PORT, name, install_key(name), rcvbuf=rcvbuf)
+        sock, pid = mrclient.join(HOST, PORT, name, install_key(name), rcvbuf=rcvbuf, ft_before_h=ft_before_h)
         self.addCleanup(sock.close)
         udpsock = None
         if udp:
@@ -315,6 +315,65 @@ class TransportTests(unittest.TestCase):
             mrclient.recv_until(c.sock, lambda p: p == b"E:mrciPong:hola", 2.0),
             "no volvio el evento fiable por TCP",
         )
+
+    def is_player_connected(self, pilot):
+        """Lo que `MP.IsPlayerConnected(pid)` devuelve al plugin de CI para `pilot`."""
+        mrclient.send_packet(pilot.sock, b"E:mrciIsConn:x")
+        packet = mrclient.recv_until(pilot.sock, lambda p: p.startswith(b"E:mrciConn:"), 3.0)
+        self.assertIsNotNone(packet, "%s: el plugin de CI no contesto mrciConn" % pilot.name)
+        return packet[len(b"E:mrciConn:"):].decode()
+
+    def test_is_player_connected_udp_client(self):
+        a = self.pilot("PilotoU11")
+        self.assertEqual(self.is_player_connected(a), "true")
+
+    def test_is_player_connected_tcp_only_client(self):
+        c = self.pilot("PilotoT12", udp=False)
+        self.make_tcp_only(c)
+        self.assertEqual(self.is_player_connected(c), "true")
+
+    def test_is_player_connected_client_without_udp_nor_ft(self):
+        # un launcher 1.0 con el UDP caido: ni UDP ni Ft; el significado de la API no cambia
+        old = self.pilot("PilotoN13", udp=False)
+        self.assertEqual(self.is_player_connected(old), "false")
+
+    def test_client_cannot_trigger_on_player_transport(self):
+        s = self.pilot("PilotoS10")
+        mrclient.send_packet(s.sock, b"E:onPlayerTransport:tcp")
+        # el eco va despues en la misma cola de eventos del plugin: su respuesta
+        # prueba que el evento falso ya se proceso (o se descarto)
+        mrclient.send_packet(s.sock, b"E:mrciEcho:fin")
+        self.assertIsNotNone(
+            mrclient.recv_until(s.sock, lambda p: p == b"E:mrciPong:fin", 3.0),
+            "no volvio el eco tras el evento falso",
+        )
+        time.sleep(0.5)  # margen para que el logger vuelque la linea, si existiera
+        text = read_log()
+        self.assertNotIn("MRCI transport name=%s" % s.name, text)
+        self.assertNotIn(TCP_ONLY_LINE % s.name, text)
+
+    def test_ft_before_h_forced_mode_order(self):
+        # modo forzado del launcher: `Ft` llega antes de `H`
+        a = self.pilot("PilotoA14")
+        f = self.pilot("PilotoF14", udp=False, ft_before_h=True)
+        line = "MRCI transport name=%s kind=tcp" % f.name
+        self.assertEqual(wait_for_log(line).count(line), 1)
+        self.assertEqual(read_log().count(TCP_ONLY_LINE % f.name), 1)
+
+        # la sincronizacion termino (join) y el cliente recibe todo por TCP
+        from_a = position(a.pid)
+        mrclient.udp_send(a.udp, a.pid, from_a)
+        self.assertIsNotNone(
+            mrclient.recv_until(f.sock, lambda packet: packet == from_a, 2.0),
+            "F no recibio por TCP la posicion de A",
+        )
+        mrclient.send_packet(f.sock, b"p")
+        self.assertIsNotNone(
+            mrclient.recv_until(f.sock, lambda packet: packet == b"p", 2.0),
+            "F no recibio p por TCP",
+        )
+        # el evento se disparo una sola vez
+        self.assertEqual(read_log().count(line), 1)
 
     def test_old_launcher_without_ft(self):
         # Un launcher 1.0: sin `Ft`, sin UDP. Sigue conectado y atendido por TCP.

@@ -17,7 +17,12 @@ function MrCiEcho(pid, data)
     MP.TriggerClientEvent(pid, "mrciPong", data)
 end
 
+function MrCiIsConnected(pid, data)
+    MP.TriggerClientEvent(pid, "mrciConn", tostring(MP.IsPlayerConnected(pid)))
+end
+
 function onInit()
     MP.RegisterEvent("onPlayerTransport", "MrCiOnTransport")
     MP.RegisterEvent("mrciEcho", "MrCiEcho")
+    MP.RegisterEvent("mrciIsConn", "MrCiIsConnected")
 end
