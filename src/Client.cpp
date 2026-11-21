@@ -150,9 +150,25 @@ TServer& TClient::Server() const {
 }
 
 void TClient::EnqueuePacket(const std::vector<uint8_t>& Packet) {
-    std::unique_lock Lock(mMissedPacketsMutex);
-    mPacketsSync.push(Packet);
-    mQueuedBytes.fetch_add(Packet.size(), std::memory_order_acq_rel);
+    if (mQueueOverflowed.load(std::memory_order_acquire)) {
+        return; // terminal: the client is being disconnected and nobody will drain this
+    }
+    size_t Queued = 0;
+    {
+        std::unique_lock Lock(mMissedPacketsMutex);
+        mPacketsSync.push(Packet);
+        Queued = mQueuedBytes.fetch_add(Packet.size(), std::memory_order_acq_rel) + Packet.size();
+    }
+    // Hard cap. Done here, right after the push and with the queue mutex released, so it triggers
+    // promptly on whichever thread produced the packet. Disconnect() takes no lock of its own (it
+    // is a lock-free single-winner guard plus shutdown/close of the socket, which also wakes the
+    // Looper if it is blocked writing to this client) and never enqueues, so it cannot deadlock
+    // or re-enter, and callers already use it from foreign threads (name clash, UDP failure).
+    if (Queued > kQueueHardCapBytes && !mQueueOverflowed.exchange(true, std::memory_order_acq_rel)) {
+        beammp_warnf("Cliente {} ('{}'): cola de envio desbordada ({} bytes en cola, tope {}), se desconecta", GetID(), GetName(), Queued, kQueueHardCapBytes);
+        (void)Disconnect("cola de envio desbordada");
+        ClearQueue(); // free the memory now instead of waiting for the client object to die
+    }
 }
 
 bool TClient::DequeuePacket(std::vector<uint8_t>& Out) {

@@ -102,6 +102,11 @@ public:
     void SetIsGuest(bool NewIsGuest) { mIsGuest = NewIsGuest; }
     void SetIsSynced(bool NewIsSynced) { mIsSynced = NewIsSynced; }
     void SetIsSyncing(bool NewIsSyncing) { mIsSyncing = NewIsSyncing; }
+    // Hard cap on the bytes queued for one client, whatever the client does: a client that never reads
+    // its socket would otherwise make every reliable broadcast (and every `p` reply) pile up in RAM.
+    static constexpr size_t kQueueHardCapBytes = 32 * 1024 * 1024;
+    // Queues a packet. Thread-safe. When the queue goes over kQueueHardCapBytes the client is
+    // disconnected and its queue dropped; packets enqueued after that are discarded.
     void EnqueuePacket(const std::vector<uint8_t>& Packet);
     // Bytes currently waiting in the queue. Producers add under the queue mutex in EnqueuePacket;
     // the single consumer (the Looper) subtracts under the same mutex via the two functions below.
@@ -140,13 +145,15 @@ private:
     std::queue<std::vector<uint8_t>> mPacketsSync;
     std::atomic<size_t> mQueuedBytes { 0 };
     std::atomic<bool> mQueueDropLogged { false };
+    std::atomic<bool> mQueueOverflowed { false };
     std::unordered_map<std::string, std::string> mIdentifiers;
     bool mIsGuest = false;
     mutable std::mutex mVehicleDataMutex;
     mutable std::mutex mVehiclePositionMutex;
     TSetOfVehicleData mVehicleData;
     SparseArray<std::string> mVehiclePosition;
-    std::string mName = "Unknown Client";
+    // Empty until authentication succeeds: TNetwork::TCPRcv uses it to tell unauthenticated clients apart.
+    std::string mName;
     // Once disconnect starts, this client is terminal and its socket must be treated as dead.
     std::atomic<EDisconnectState> mDisconnectState { EDisconnectState::Connected };
     ip::tcp::socket mSocket;

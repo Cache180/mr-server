@@ -391,8 +391,9 @@ std::vector<uint8_t> DeComp(std::span<const uint8_t> input) {
             if (output_buffer.size() >= MAX_DECOMPRESSION_BUFFER_SIZE) {
                 throw std::runtime_error(fmt::format("decompressed packet size of {} bytes exceeded", MAX_DECOMPRESSION_BUFFER_SIZE));
             }
-            // if decompression fails, we double the buffer size (up to the allowed limit) and try again
-            output_buffer.resize(std::max<size_t>(output_buffer.size() * 2, MAX_DECOMPRESSION_BUFFER_SIZE));
+            // if decompression fails, we double the buffer size (up to the allowed limit) and try again.
+            // The std::max(.., 1) keeps an empty buffer from doubling to 0 and retrying forever.
+            output_buffer.resize(std::min<size_t>(std::max<size_t>(output_buffer.size(), 1) * 2, MAX_DECOMPRESSION_BUFFER_SIZE));
             beammp_warnf("zlib uncompress() failed, trying with a larger buffer size of {}", output_buffer.size());
             output_size = output_buffer.size();
         } else if (res != Z_OK) {

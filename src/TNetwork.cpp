@@ -510,9 +510,14 @@ bool TNetwork::AcceptLauncherHeader(TClient& Client, const std::vector<uint8_t>&
     constexpr std::string_view Prefix = "MR";
     constexpr size_t MaxHeaderBytes = 32; // `MR` + version: nada razonable es mas largo
     const std::string_view Raw(reinterpret_cast<const char*>(Header.data()), Header.size());
-    if (Raw.size() <= Prefix.size() || Raw.size() > MaxHeaderBytes || Raw.substr(0, Prefix.size()) != Prefix) {
-        // La cabecera cruda no se registra: viene de un cliente sin autenticar.
+    // La cabecera cruda no se registra en ningun caso: viene de un cliente sin autenticar.
+    if (Raw.substr(0, Prefix.size()) != Prefix) {
         ClientKick(Client, std::string(MR::KickWrongLauncher));
+        return false;
+    }
+    if (Raw.size() == Prefix.size() || Raw.size() > MaxHeaderBytes) {
+        // Empieza por `MR` pero no trae una version utilizable: es un launcher MR roto o viejo.
+        ClientKick(Client, MR::KickOutdated(Application::ClientMinimumVersion()));
         return false;
     }
     const std::string VersionStr(Raw.substr(Prefix.size()));
@@ -716,6 +721,13 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, bool WithTimeout) {
 
     constexpr std::string_view ABG = "ABG:";
     if (Data.size() >= ABG.size() && std::equal(Data.begin(), Data.begin() + ABG.size(), ABG.begin(), ABG.end())) {
+        if (isUnauthenticated) {
+            // The two packets a launcher sends before authenticating (`MR<version>` and the identity,
+            // <= 256 bytes) are never compressed, so nothing legitimate gets here: never spend CPU or
+            // RAM decompressing data from a client that has not identified itself.
+            ClientKick(c, MR::KickBadIdentity("formato invalido"));
+            return { };
+        }
         Data.erase(Data.begin(), Data.begin() + ABG.size());
         try {
             return DeComp(Data);
