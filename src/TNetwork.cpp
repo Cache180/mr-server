@@ -1260,7 +1260,7 @@ bool TNetwork::Respond(TClient& c, const std::vector<uint8_t>& MSG, bool Rel, bo
             return TCPSend(c, MSG, isSync);
         }
     } else {
-        return UDPSend(c, MSG);
+        return SendUnreliable(c, MSG);
     }
 }
 
@@ -1351,7 +1351,7 @@ void TNetwork::SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self
                         // ret = TCPSend(*Client, Data);
                     }
                 } else {
-                    ret = UDPSend(*Client, Data);
+                    ret = SendUnreliable(*Client, Data);
                 }
             }
         }
@@ -1383,6 +1383,22 @@ bool TNetwork::UDPSend(TClient& Client, std::vector<uint8_t> Data) {
             DisconnectClient(Client, "UDP send failed");
         return false;
     }
+    return true;
+}
+
+bool TNetwork::SendUnreliable(TClient& Client, std::vector<uint8_t> Data) {
+    if (!Client.IsTcpOnly()) {
+        return UDPSend(Client, std::move(Data));
+    }
+    if (Client.IsDisconnected()) {
+        return true;
+    }
+    // Same wire format as UDPSend: large packets are compressed (`ABG:`). The client's own
+    // Looper thread is the only writer that drains this queue to the socket.
+    if (Data.size() > 400) {
+        CompressProperly(Data);
+    }
+    Client.EnqueuePacket(Data);
     return true;
 }
 

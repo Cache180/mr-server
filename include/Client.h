@@ -91,6 +91,11 @@ public:
     [[nodiscard]] int GetID() const { return mID; }
     [[nodiscard]] int GetUnicycleID() const { return mUnicycleID; }
     [[nodiscard]] bool IsUDPConnected() const { return mIsUDPConnected; }
+    // "Solo TCP" client: its UDP does not work (control packet `Ft`, over TCP). Everything that
+    // would go out over UDP goes through its per-client queue (EnqueuePacket) instead.
+    // SetTcpOnly() returns true only the first time it is called.
+    [[nodiscard]] bool IsTcpOnly() const { return mIsTcpOnly.load(std::memory_order_acquire); }
+    [[nodiscard]] bool SetTcpOnly() { return !mIsTcpOnly.exchange(true, std::memory_order_acq_rel); }
     [[nodiscard]] bool IsSynced() const { return mIsSynced; }
     [[nodiscard]] bool IsSyncing() const { return mIsSyncing; }
     [[nodiscard]] bool IsGuest() const { return mIsGuest; }
@@ -120,6 +125,7 @@ private:
 
     TServer& mServer;
     bool mIsUDPConnected = false;
+    std::atomic<bool> mIsTcpOnly { false };
     bool mIsSynced = false;
     bool mIsSyncing = false;
     mutable std::mutex mMissedPacketsMutex;

@@ -219,6 +219,18 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
             // TODO handle
         }
         return;
+    case 'F': // transport control, launcher -> server
+        // Only `Ft` ("my UDP does not work, send me everything over TCP") exists. It is a control
+        // packet and is only honoured over TCP; over UDP it is ignored.
+        if (udp) {
+            beammp_debugf("Received 'F' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
+            return;
+        }
+        if (StringPacket == "Ft" && LockedClient->SetTcpOnly()) {
+            beammp_infof("{} usa solo TCP (UDP no disponible)", LockedClient->GetName());
+            LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onPlayerTransport", "", LockedClient->GetID(), std::string("tcp")));
+        }
+        return;
     case 'p':
         if (!Network.Respond(*LockedClient, StringToVector("p"), false)) {
             // failed to send

@@ -45,6 +45,9 @@ public:
     std::shared_ptr<TClient> Authentication(TConnection&& ClientConnection);
     void SyncResources(TClient& c);
     [[nodiscard]] bool UDPSend(TClient& Client, std::vector<uint8_t> Data);
+    // Non-reliable send: UDP, or the client's own queue when the client is "solo TCP".
+    // Never writes to the TCP socket itself, so it is safe to call from the UDP receive thread.
+    [[nodiscard]] bool SendUnreliable(TClient& Client, std::vector<uint8_t> Data);
     void SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self, bool Rel);
     void UpdatePlayer(TClient& Client);
     boost::system::error_code ReadWithTimeout(boost::asio::ip::tcp::socket& Socket, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout);
