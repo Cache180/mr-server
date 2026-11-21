@@ -53,7 +53,18 @@ static constexpr uint8_t MAX_GLOBAL_CONNECTIONS = 128;
 // whereas an unbounded queue grows without limit for a client whose link carries less than the
 // position stream. Reliable packets are never dropped by this rule.
 static constexpr size_t kTcpOnlyQueueCapBytes = 512 * 1024;
-static constexpr uint8_t READ_TIMEOUT_S = 10; // seconds
+// Total time from accept() until the identity is accepted: every read before authentication shares it
+// (it is not renewed per read). Waiting for the Lua onPlayerAuth handlers is not counted: nothing is read then.
+static constexpr uint8_t PREAUTH_DEADLINE_S = 10; // seconds
+// Connections accepted but not yet inserted as clients: per IP and in total. Authenticated sessions
+// only count against MAX_CONCURRENT_CONNECTIONS / MAX_GLOBAL_CONNECTIONS.
+static constexpr uint8_t MAX_PREAUTH_PER_IP = 3;
+static constexpr uint8_t MAX_PREAUTH_GLOBAL = 32;
+
+// Time left until Deadline (zero once it has passed).
+static std::chrono::steady_clock::duration TimeUntil(std::chrono::steady_clock::time_point Deadline) {
+    return std::max(Deadline - std::chrono::steady_clock::now(), std::chrono::steady_clock::duration::zero());
+}
 
 std::vector<uint8_t> StringToVector(const std::string& Str) {
     return std::vector<uint8_t>(Str.data(), Str.data() + Str.size());
@@ -101,7 +112,7 @@ TNetwork::TNetwork(TServer& Server, TPPSMonitor& PPSMonitor, TResourceManager& R
     , mPPSMonitor(PPSMonitor)
     , mUDPSock(Server.IoCtx())
     , mResourceManager(ResourceManager)
-    , mConnectionLimiter(MAX_CONCURRENT_CONNECTIONS, MAX_GLOBAL_CONNECTIONS) {
+    , mConnectionLimiter(MAX_CONCURRENT_CONNECTIONS, MAX_GLOBAL_CONNECTIONS, MAX_PREAUTH_PER_IP, MAX_PREAUTH_GLOBAL) {
     Application::SetSubsystemStatus("TCPNetwork", Application::Status::Starting);
     Application::SetSubsystemStatus("UDPNetwork", Application::Status::Starting);
     Application::RegisterShutdownHandler([&] {
@@ -310,9 +321,10 @@ namespace json = rapidjson;
 
 void TNetwork::Identify(TConnection&& RawConnection, TConnectionLimiter::TGuard&& Guard) {
     RegisterThreadAuto();
+    const auto PreAuthDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(PREAUTH_DEADLINE_S);
     char Code;
 
-    boost::system::error_code ec = ReadWithTimeout(RawConnection, &Code, 1, std::chrono::seconds(READ_TIMEOUT_S));
+    boost::system::error_code ec = ReadWithTimeout(RawConnection, &Code, 1, TimeUntil(PreAuthDeadline));
     if (ec) {
         // TODO: is this right?!
         beammp_debug("Error occured reading code");
@@ -324,7 +336,7 @@ void TNetwork::Identify(TConnection&& RawConnection, TConnectionLimiter::TGuard&
     std::shared_ptr<TClient> Client { nullptr };
     try {
         if (Code == 'C') {
-            Client = Authentication(std::move(RawConnection));
+            Client = Authentication(std::move(RawConnection), Guard, PreAuthDeadline);
         } else if (Code == 'D') {
             beammp_errorf("Old download packet detected - the client is wildly out of date, this will be ignored");
             return;
@@ -368,7 +380,7 @@ std::string HashPassword(const std::string& str) {
     return ret.str();
 }
 
-std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
+std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection, TConnectionLimiter::TGuard& Guard, std::chrono::steady_clock::time_point PreAuthDeadline) {
     auto Client = CreateClient(std::move(RawConnection.Socket));
     // El server puede escucharse solo en IPv4 (p. ej. IP = "127.0.0.1"): to_v6() lanzaria
     // bad_address_cast, asi que solo se convierte si la direccion es realmente IPv6.
@@ -390,7 +402,7 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
 
     beammp_info("Identifying new ClientConnection...");
 
-    auto Data = TCPRcv(*Client, true);
+    auto Data = TCPRcv(*Client, PreAuthDeadline);
     if (Data.empty()) {
         beammp_debug("Authentication failed: did not receive version packet");
         ClientKick(*Client, "Connection closed during version handshake");
@@ -405,7 +417,7 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         // TODO: handle
     }
 
-    auto MaybeIdentity = ReceiveIdentity(*Client);
+    auto MaybeIdentity = ReceiveIdentity(*Client, PreAuthDeadline);
     if (!MaybeIdentity.has_value()) {
         return nullptr;
     }
@@ -413,8 +425,10 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
 
     // Reserva el nombre mientras dura la autenticacion (ver mPendingNames). Se
     // libera justo despues de InsertClient, antes de TCPClient (que dura toda la sesion).
-    if (!TryReservePilotName(Identity)) {
-        ClientKick(*Client, std::string(MR::KickNameInUse));
+    const auto Clash = TryReservePilotName(Identity);
+    if (Clash != MR::NameClash::None) {
+        // Same install: its own entry is still in progress (e.g. the launcher retried). Other install: the name is taken.
+        ClientKick(*Client, std::string(Clash == MR::NameClash::SameInstall ? MR::KickEntryInProgress : MR::KickNameInUse));
         return nullptr;
     }
     struct NameReservation {
@@ -500,6 +514,7 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         beammp_info("Identification success");
         mServer.InsertClient(Client);
         Reservation.Release(); // ya figura en la lista de clientes
+        Guard.EndPreAuth(); // y deja de contar como conexion previa a la autenticacion
         TCPClient(Client);
     }
 
@@ -532,10 +547,10 @@ bool TNetwork::AcceptLauncherHeader(TClient& Client, const std::vector<uint8_t>&
     return true;
 }
 
-std::optional<MR::Identity> TNetwork::ReceiveIdentity(TClient& Client) {
+std::optional<MR::Identity> TNetwork::ReceiveIdentity(TClient& Client, std::chrono::steady_clock::time_point PreAuthDeadline) {
     // TCPRcv acota el paquete de un cliente sin autenticar (4096 bytes) y lo lee
-    // con timeout (READ_TIMEOUT_S), asi que un cliente mudo no bloquea a nadie.
-    const auto Data = TCPRcv(Client, true);
+    // con el plazo total previo a la autenticacion, asi que un cliente mudo o lento no bloquea a nadie.
+    const auto Data = TCPRcv(Client, PreAuthDeadline);
     if (Data.empty()) {
         beammp_debug("Authentication failed: did not receive identity packet");
         ClientKick(Client, "Connection closed during authentication");
@@ -558,15 +573,22 @@ std::optional<MR::Identity> TNetwork::ReceiveIdentity(TClient& Client) {
     return Parsed;
 }
 
-bool TNetwork::TryReservePilotName(const MR::Identity& Id) {
+MR::NameClash TNetwork::TryReservePilotName(const MR::Identity& Id) {
     std::lock_guard Lock(mPendingNamesMutex);
+    auto Result = MR::NameClash::None;
     for (const auto& [Name, MrId] : mPendingNames) {
-        if (MR::ClassifyNameClash(Id.Name, Id.MrId, Name, MrId) != MR::NameClash::None) {
-            return false;
+        const auto Clash = MR::ClassifyNameClash(Id.Name, Id.MrId, Name, MrId);
+        if (Clash == MR::NameClash::OtherInstall) {
+            return Clash;
+        }
+        if (Clash == MR::NameClash::SameInstall) {
+            Result = Clash;
         }
     }
-    mPendingNames.emplace_back(Id.Name, Id.MrId);
-    return true;
+    if (Result == MR::NameClash::None) {
+        mPendingNames.emplace_back(Id.Name, Id.MrId);
+    }
+    return Result;
 }
 
 void TNetwork::ReleasePilotName(const MR::Identity& Id) {
@@ -661,7 +683,7 @@ bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync
     return true;
 }
 
-std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, bool WithTimeout) {
+std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, std::optional<std::chrono::steady_clock::time_point> Deadline) {
     if (c.IsDisconnected()) {
         beammp_error("Client disconnected, cancelling TCPRcv");
         return { };
@@ -672,8 +694,8 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, bool WithTimeout) {
 
     boost::system::error_code ec;
     std::array<uint8_t, sizeof(Header)> HeaderData;
-    if (WithTimeout) {
-        ec = ReadWithTimeout(Sock, HeaderData.data(), HeaderData.size(), std::chrono::seconds(READ_TIMEOUT_S));
+    if (Deadline) {
+        ec = ReadWithTimeout(Sock, HeaderData.data(), HeaderData.size(), TimeUntil(*Deadline));
     } else {
         boost::asio::read(Sock, boost::asio::buffer(HeaderData), ec);
     }
@@ -702,9 +724,9 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, bool WithTimeout) {
         return { };
     }
     std::size_t N = 0;
-    if (WithTimeout) {
+    if (Deadline) {
         if (!Data.empty()) {
-            ec = ReadWithTimeout(Sock, Data.data(), Data.size(), std::chrono::seconds(READ_TIMEOUT_S));
+            ec = ReadWithTimeout(Sock, Data.data(), Data.size(), TimeUntil(*Deadline));
             if (!ec) {
                 N = Data.size();
             }
@@ -1345,11 +1367,15 @@ bool TNetwork::SyncClient(const std::weak_ptr<TClient>& c) {
 
         return true;
     });
+    // "synced" goes up before "syncing" goes down: there is no moment with neither flag set, in which
+    // a second writer could touch the socket.
+    if (!Return) {
+        LockedClient->SetIsSynced(true);
+    }
     LockedClient->SetIsSyncing(false);
     if (Return) {
         return res;
     }
-    LockedClient->SetIsSynced(true);
     beammp_info(LockedClient->GetName() + (" is now synced!"));
     return true;
 }

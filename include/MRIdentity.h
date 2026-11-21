@@ -52,6 +52,7 @@ NameClash ClassifyNameClash(std::string_view Name, std::string_view MrId, std::s
 
 inline constexpr std::string_view KickWrongLauncher = "Este servidor requiere MR Launcher: https://muertazosracing.com/launcher";
 inline constexpr std::string_view KickNameInUse = "Nombre en uso: elige otro nombre de piloto";
+inline constexpr std::string_view KickEntryInProgress = "Ya hay una entrada en curso con este launcher: espera unos segundos";
 std::string KickOutdated(const Version& Min);
 std::string KickBadIdentity(std::string_view Reason);
 

@@ -36,13 +36,15 @@ public:
     [[nodiscard]] bool SendLarge(TClient& c, std::vector<uint8_t> Data, bool isSync = false);
     [[nodiscard]] bool Respond(TClient& c, const std::vector<uint8_t>& MSG, bool Rel, bool isSync = false);
     std::shared_ptr<TClient> CreateClient(boost::asio::ip::tcp::socket&& TCPSock);
-    std::vector<uint8_t> TCPRcv(TClient& c, bool WithTimeout = false);
+    // With a Deadline (pre-authentication reads) every read shares that absolute deadline.
+    std::vector<uint8_t> TCPRcv(TClient& c, std::optional<std::chrono::steady_clock::time_point> Deadline = std::nullopt);
     void ClientKick(TClient& c, const std::string& R);
     void DisconnectClient(const std::weak_ptr<TClient>& c, const std::string& R);
     void DisconnectClient(TClient& c, const std::string& R);
     [[nodiscard]] bool SyncClient(const std::weak_ptr<TClient>& c);
     void Identify(TConnection&& client, TConnectionLimiter::TGuard&&);
-    std::shared_ptr<TClient> Authentication(TConnection&& ClientConnection);
+    // Guard: leaves the pre-authentication quotas once the client is inserted. PreAuthDeadline: see PREAUTH_DEADLINE_S.
+    std::shared_ptr<TClient> Authentication(TConnection&& ClientConnection, TConnectionLimiter::TGuard& Guard, std::chrono::steady_clock::time_point PreAuthDeadline);
     void SyncResources(TClient& c);
     [[nodiscard]] bool UDPSend(TClient& Client, std::vector<uint8_t> Data);
     // Non-reliable send: UDP, or the client's own queue when the client is "solo TCP".
@@ -77,8 +79,9 @@ private:
     // Autenticacion MR (ver TNetwork::Authentication). Las dos primeras expulsan
     // al cliente y devuelven false/nullopt si el paquete no es valido.
     bool AcceptLauncherHeader(TClient& Client, const std::vector<uint8_t>& Header);
-    std::optional<MR::Identity> ReceiveIdentity(TClient& Client);
-    bool TryReservePilotName(const MR::Identity& Id);
+    std::optional<MR::Identity> ReceiveIdentity(TClient& Client, std::chrono::steady_clock::time_point PreAuthDeadline);
+    // None: nombre reservado. SameInstall / OtherInstall: otra entrada en curso lo tiene (no se reserva).
+    MR::NameClash TryReservePilotName(const MR::Identity& Id);
     void ReleasePilotName(const MR::Identity& Id);
     // false: el nombre lo usa otra instalacion y hay que expulsar al nuevo.
     // Si es la misma instalacion, desconecta la sesion vieja (como el "Stale Client" de upstream).

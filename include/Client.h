@@ -145,8 +145,9 @@ private:
     TServer& mServer;
     bool mIsUDPConnected = false;
     std::atomic<bool> mIsTcpOnly { false };
-    bool mIsSynced = false;
-    bool mIsSyncing = false;
+    // Atomic: read by the UDP / Lua / console threads while SyncClient flips them.
+    std::atomic<bool> mIsSynced { false };
+    std::atomic<bool> mIsSyncing { false };
     std::mutex mSocketMutex; // leaf lock: serialises close (Disconnect) with shutdown / set_option
     mutable std::mutex mMissedPacketsMutex;
     std::queue<std::vector<uint8_t>> mPacketsSync;
