@@ -29,6 +29,7 @@ compartir el servidor con las demas suites.
 import json
 import os
 import re
+import struct
 import sys
 import time
 import unittest
@@ -129,6 +130,13 @@ class HandshakeTests(unittest.TestCase):
         mrclient.send_packet(sock, b"ABG:" + zlib.compress(b"MR1.0"))
         self.assert_kicked(mrclient.recv_packet(sock), "Identidad invalida: formato invalido")
         self.assert_other_client_accepted("CiTrasZip3")
+
+    def test_large_packet_before_auth_rejected(self):
+        # antes de autenticar el cuerpo de un paquete se acota a 4096 bytes: basta la cabecera de longitud
+        sock = self.accept_header_only()
+        sock.sendall(struct.pack("<i", 5000))
+        self.assert_kicked(mrclient.recv_packet(sock), "Header size limit exceeded")
+        self.assert_other_client_accepted("CiTrasGrande")
 
     def test_valid_identity_accepted(self):
         ok, reply = mrclient.handshake(self.open(), "MR1.0", identity("CiPiloto", INSTALL_A))
