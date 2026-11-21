@@ -30,9 +30,11 @@ compartir el servidor con las demas suites.
 import collections
 import hashlib
 import os
+import socket
 import sys
 import time
 import unittest
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mrclient  # noqa: E402
@@ -40,6 +42,7 @@ import mrclient  # noqa: E402
 HOST = os.environ.get("MR_SERVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MR_SERVER_PORT", "30899"))
 LOG = os.environ.get("MR_SERVER_LOG", "")
+SERVER_PID = int(os.environ.get("MR_SERVER_PID", "0"))
 
 TCP_ONLY_LINE = "%s usa solo TCP (UDP no disponible)"
 
@@ -74,6 +77,45 @@ def wait_for_log(needle, timeout=5.0):
         if needle in text or time.monotonic() >= deadline:
             return text
         time.sleep(0.1)
+
+
+def server_rss_kb():
+    with open("/proc/%d/status" % SERVER_PID, "r") as handle:
+        for line in handle:
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+    raise RuntimeError("VmRSS no encontrado")
+
+
+def tcp_wmem_max():
+    with open("/proc/sys/net/ipv4/tcp_wmem", "r") as handle:
+        return int(handle.read().split()[2])
+
+
+def drain_udp(udpsock):
+    """Vacia sin esperar el buffer de recepcion UDP; devuelve los datagramas leidos."""
+    got = []
+    udpsock.settimeout(0.0)
+    try:
+        while True:
+            got.append(udpsock.recv(4096))
+    except (BlockingIOError, socket.timeout):
+        return got
+
+
+def drain_tcp(sock, idle):
+    """Lee bytes crudos hasta `idle` segundos sin datos; devuelve cuantos leyo."""
+    total = 0
+    sock.settimeout(idle)
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+    except socket.timeout:
+        pass
+    return total
 
 
 class TransportTests(unittest.TestCase):
@@ -174,28 +216,105 @@ class TransportTests(unittest.TestCase):
     def test_slow_tcp_only_client_does_not_stall_others(self):
         a = self.pilot("PilotoA6")
         b = self.pilot("PilotoB6")
-        c = self.pilot("PilotoC6", udp=False, rcvbuf=2048)
+        c = self.pilot("PilotoC6", udp=False)
         self.make_tcp_only(c)
-        # C deja de leer desde aqui: cada posicion de A y B se acumula en su cola.
+        # C deja de leer desde aqui.
 
+        # 1) Inundacion: mas posiciones hacia C de las que caben en los buffers del
+        # kernel (2 x tcp_wmem max + 64 KB), para que el Looper de C acabe bloqueado
+        # en su escritura y la cola de C llegue al tope. A ritmo moderado para que
+        # el buffer UDP del server no tire datagramas; B drena lo que le llega.
+        target = 2 * tcp_wmem_max() + 64 * 1024
+        rss_before_kb = server_rss_kb()
+        offered = 0  # bytes que el server tuvo que entregar a C (marco TCP incluido)
+        seq = 0
+        flood_deadline = time.monotonic() + 60.0
+        while offered < target:
+            self.assertLess(time.monotonic(), flood_deadline, "la inundacion no avanza")
+            for _ in range(40):
+                mrclient.udp_send(a.udp, a.pid, position(a.pid, seq, POSITION_PADDING))
+                seq += 1
+            # lo que B recibe es lo que el server proceso (y entrego tambien a C)
+            offered += sum(len(d) + 4 for d in drain_udp(b.udp) if d.startswith(b"Zp:"))
+            time.sleep(0.002)
+
+        # 2) Con el Looper de C bloqueado, A y B siguen intercambiando a tiempo.
         exchanges = 200
         started = time.monotonic()
         deadline = started + 5.0
-        for seq in range(exchanges):
-            from_a = position(a.pid, seq, POSITION_PADDING)
+        for n in range(exchanges):
+            from_a = position(a.pid, 1000000 + n, POSITION_PADDING)
             mrclient.udp_send(a.udp, a.pid, from_a)
             got_b = mrclient.udp_recv_until(
                 b.udp, lambda datagram, want=from_a: datagram == want, deadline - time.monotonic()
             )
-            self.assertIsNotNone(got_b, "B no recibio la posicion %d de A a tiempo" % seq)
+            self.assertIsNotNone(got_b, "B no recibio la posicion %d de A a tiempo" % n)
 
-            from_b = position(b.pid, seq, POSITION_PADDING)
+            from_b = position(b.pid, 1000000 + n, POSITION_PADDING)
             mrclient.udp_send(b.udp, b.pid, from_b)
             got_a = mrclient.udp_recv_until(
                 a.udp, lambda datagram, want=from_b: datagram == want, deadline - time.monotonic()
             )
-            self.assertIsNotNone(got_a, "A no recibio la posicion %d de B a tiempo" % seq)
+            self.assertIsNotNone(got_a, "A no recibio la posicion %d de B a tiempo" % n)
         self.assertLess(time.monotonic() - started, 5.0)
+
+        # 3) El server no acumulo la inundacion en memoria.
+        growth_kb = server_rss_kb() - rss_before_kb
+        self.assertLess(growth_kb, 64 * 1024, "el RSS del server crecio %d KB" % growth_kb)
+
+        # 4) Tope de la cola: C vuelve a leer y recibe MENOS de lo ofrecido (el server
+        # descarto posiciones al llenarse la cola) pero sigue conectado y atendido.
+        self.assertGreater(offered, 0.9 * target, "la inundacion no llego al server")
+        received = drain_tcp(c.sock, 2.0)
+        self.assertGreater(received, 64 * 1024, "C no recibio nada de lo acumulado")
+        self.assertLess(
+            received, 0.9 * offered,
+            "C recibio %d de %d bytes ofrecidos: el server no descarto posiciones" % (received, offered),
+        )
+        mrclient.send_packet(c.sock, b"p")
+        self.assertIsNotNone(
+            mrclient.recv_until(c.sock, lambda packet: packet == b"p", 3.0),
+            "C no recibio p por TCP tras volver a leer",
+        )
+
+    def test_large_position_to_tcp_only_is_compressed(self):
+        a = self.pilot("PilotoA8", udp=False)
+        c = self.pilot("PilotoC8", udp=False)
+        self.make_tcp_only(c)
+
+        sent = position(a.pid, 1, 700)  # entre 400 y 1000 bytes: el server lo comprime
+        self.assertTrue(400 < len(sent) < 1000)
+        mrclient.send_packet(a.sock, sent)
+        packet = mrclient.recv_until(c.sock, lambda p: p.startswith(b"ABG:"), 2.0)
+        self.assertIsNotNone(packet, "C no recibio la posicion grande comprimida por TCP")
+        self.assertEqual(zlib.decompress(packet[4:]), sent)
+
+    def test_on_player_transport_event_and_reliable_path(self):
+        c = self.pilot("PilotoC9", udp=False)
+        for _ in range(50):
+            mrclient.send_packet(c.sock, b"Ft")
+        mrclient.send_packet(c.sock, b"p")
+
+        events = []
+
+        def collect_events(packet):
+            if packet.startswith(b"E:mrci"):
+                events.append(packet)
+            return packet.startswith(b"E:mrci3:")
+
+        self.assertIsNotNone(mrclient.recv_until(c.sock, collect_events, 3.0), "faltan eventos fiables por TCP")
+        self.assertEqual(events, [b"E:mrci1:a", b"E:mrci2:b", b"E:mrci3:c"])
+        # nada mas llega: el evento Lua se disparo una sola vez
+        self.assertEqual([p for p in mrclient.collect(c.sock, 0.5) if p.startswith(b"E:mrci")], [])
+        line = "MRCI transport name=%s kind=tcp" % c.name
+        self.assertEqual(wait_for_log(line).count(line), 1)
+
+        # ida y vuelta fiable: evento del cliente -> Lua -> TriggerClientEvent -> TCP
+        mrclient.send_packet(c.sock, b"E:mrciEcho:hola")
+        self.assertIsNotNone(
+            mrclient.recv_until(c.sock, lambda p: p == b"E:mrciPong:hola", 2.0),
+            "no volvio el evento fiable por TCP",
+        )
 
     def test_old_launcher_without_ft(self):
         # Un launcher 1.0: sin `Ft`, sin UDP. Sigue conectado y atendido por TCP.

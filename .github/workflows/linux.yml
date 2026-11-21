@@ -100,6 +100,9 @@ jobs:
           BIN="$PWD/bin/BeamMP-Server"
           WORK="$(mktemp -d)"
           cp test/mr/ServerConfig.ci.toml "$WORK/ServerConfig.toml"
+          # plugin Lua solo de CI (evento onPlayerTransport); no se entrega con el binario
+          mkdir -p "$WORK/Resources/Server/MrCiTransport"
+          cp test/mr/ci_plugin/main.lua "$WORK/Resources/Server/MrCiTransport/main.lua"
           # stdin abierto (lectura/escritura) para que la consola del server no vea EOF
           mkfifo "$WORK/stdin"
           exec 3<>"$WORK/stdin"
@@ -124,7 +127,7 @@ jobs:
           if [ "$RC" -eq 0 ]; then RC=$RC_HANDSHAKE; fi
 
           RC_TRANSPORT=0
-          MR_SERVER_LOG="$WORK/server.log" MR_SERVER_PORT=30899 python3 test/mr/test_transport.py -v || RC_TRANSPORT=$?
+          MR_SERVER_LOG="$WORK/server.log" MR_SERVER_PID="$SERVER_PID" MR_SERVER_PORT=30899 python3 test/mr/test_transport.py -v || RC_TRANSPORT=$?
           if [ "$RC" -eq 0 ]; then RC=$RC_TRANSPORT; fi
 
           kill -INT "$SERVER_PID" 2>/dev/null
