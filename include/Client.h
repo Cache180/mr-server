@@ -105,9 +105,18 @@ public:
     // Hard cap on the bytes queued for one client, whatever the client does: a client that never reads
     // its socket would otherwise make every reliable broadcast (and every `p` reply) pile up in RAM.
     static constexpr size_t kQueueHardCapBytes = 32 * 1024 * 1024;
-    // Queues a packet. Thread-safe. When the queue goes over kQueueHardCapBytes the client is
-    // disconnected and its queue dropped; packets enqueued after that are discarded.
+    // Queues a packet. Thread-safe. When the queue goes over kQueueHardCapBytes the client is marked
+    // as overflowed, its socket is shut down (never closed here) and its queue dropped; packets
+    // enqueued after that are discarded. The thread that owns the socket (TNetwork::TCPClient) sees
+    // QueueOverflowed() or the failed read and performs the disconnect with kQueueOverflowReason.
+    static constexpr const char* kQueueOverflowReason = "cola de envio desbordada";
     void EnqueuePacket(const std::vector<uint8_t>& Packet);
+    [[nodiscard]] bool QueueOverflowed() const { return mQueueOverflowed.load(std::memory_order_acquire); }
+    // shutdown(both) on the socket, without closing it: wakes the thread blocked reading it. Safe
+    // against a concurrent Disconnect(), which closes the socket under the same mutex.
+    void ShutdownSocket();
+    // TCP_NODELAY on the socket (best effort, failure is only logged at debug level).
+    void SetTcpNoDelay();
     // Bytes currently waiting in the queue. Producers add under the queue mutex in EnqueuePacket;
     // the single consumer (the Looper) subtracts under the same mutex via the two functions below.
     [[nodiscard]] size_t QueuedBytes() const { return mQueuedBytes.load(std::memory_order_acquire); }
@@ -116,10 +125,7 @@ public:
     void ClearQueue();
     // True only the first time it is called: lets the server log "dropping" once per client.
     [[nodiscard]] bool MarkQueueDropLogged() { return !mQueueDropLogged.exchange(true, std::memory_order_acq_rel); }
-    [[nodiscard]] std::queue<std::vector<uint8_t>>& MissedPacketQueue() { return mPacketsSync; }
-    [[nodiscard]] const std::queue<std::vector<uint8_t>>& MissedPacketQueue() const { return mPacketsSync; }
     [[nodiscard]] size_t MissedPacketQueueSize() const { return mPacketsSync.size(); }
-    [[nodiscard]] std::mutex& MissedPacketQueueMutex() const { return mMissedPacketsMutex; }
     void SetIsUDPConnected(bool NewIsConnected) { mIsUDPConnected = NewIsConnected; }
     [[nodiscard]] TServer& Server() const;
     void UpdatePingTime();
@@ -141,6 +147,7 @@ private:
     std::atomic<bool> mIsTcpOnly { false };
     bool mIsSynced = false;
     bool mIsSyncing = false;
+    std::mutex mSocketMutex; // leaf lock: serialises close (Disconnect) with shutdown / set_option
     mutable std::mutex mMissedPacketsMutex;
     std::queue<std::vector<uint8_t>> mPacketsSync;
     std::atomic<size_t> mQueuedBytes { 0 };

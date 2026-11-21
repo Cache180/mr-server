@@ -437,7 +437,7 @@ bool LuaAPI::MP::IsPlayerConnected(int ID) {
     auto MaybeClient = GetClient(Engine->Server(), ID);
     if (MaybeClient) {
         if (auto c = MaybeClient.value().lock()) {
-            return c->IsUDPConnected();
+            return c->IsUDPConnected() || c->IsTcpOnly();
         }
     }
     return false;

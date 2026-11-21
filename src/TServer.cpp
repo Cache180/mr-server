@@ -228,6 +228,10 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         }
         if (StringPacket == "Ft" && LockedClient->SetTcpOnly()) {
             beammp_infof("{} usa solo TCP (UDP no disponible)", LockedClient->GetName());
+            // This client's real-time stream now rides on TCP: do not let Nagle batch the small frames.
+            LockedClient->SetTcpNoDelay();
+            // Can fire before or after onPlayerJoin: a forced-mode launcher sends `Ft` before `H`, an
+            // auto-mode one only after its UDP fell silent. Plugins must not assume the player joined.
             LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onPlayerTransport", "", LockedClient->GetID(), std::string("tcp")));
         }
         return;
@@ -344,7 +348,7 @@ void TServer::HandleEvent(TClient& c, const std::string& RawData) {
 
     std::vector<std::string> exclude = {"onInit", "onFileChanged","onVehicleDeleted","onConsoleInput","onPlayerAuth","postPlayerAuth", "onPlayerDisconnect",
     "onPlayerConnecting","onPlayerJoining","onPlayerJoin","onChatMessage","postChatMessage","onVehicleSpawn","postVehicleSpawn","onVehicleEdited", "postVehicleEdited",
-    "onVehicleReset","onVehiclePaintChanged","onShutdown"};
+    "onVehicleReset","onVehiclePaintChanged","onShutdown","onPlayerTransport"};
 
     if (std::ranges::find(exclude, Name) != exclude.end()) {
         beammp_debugf("Excluded event triggered by client '{}' ({}): '{}', ignoring.", c.GetName(), c.GetID(), Name);

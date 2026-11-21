@@ -85,6 +85,7 @@ bool TClient::Disconnect(std::string_view Reason) {
 
     beammp_debugf("Disconnecting client {} for reason: {}", GetID(), Reason);
     boost::system::error_code ec;
+    std::scoped_lock SocketLock(mSocketMutex);
     if (mSocket.is_open()) {
         mSocket.shutdown(socket_base::shutdown_both, ec);
         if (ec) {
@@ -159,15 +160,36 @@ void TClient::EnqueuePacket(const std::vector<uint8_t>& Packet) {
         mPacketsSync.push(Packet);
         Queued = mQueuedBytes.fetch_add(Packet.size(), std::memory_order_acq_rel) + Packet.size();
     }
-    // Hard cap. Done here, right after the push and with the queue mutex released, so it triggers
-    // promptly on whichever thread produced the packet. Disconnect() takes no lock of its own (it
-    // is a lock-free single-winner guard plus shutdown/close of the socket, which also wakes the
-    // Looper if it is blocked writing to this client) and never enqueues, so it cannot deadlock
-    // or re-enter, and callers already use it from foreign threads (name clash, UDP failure).
+    // Hard cap. Done here, right after the push and with the queue mutex released. This runs on
+    // whichever thread produced the packet, which is usually NOT the one that owns the socket, so it
+    // must not close it (that raced the owner's reader and the Looper): it only flags the client and
+    // wakes the owner with shutdown(); the owner then disconnects (see TNetwork::TCPClient).
     if (Queued > kQueueHardCapBytes && !mQueueOverflowed.exchange(true, std::memory_order_acq_rel)) {
-        beammp_warnf("Cliente {} ('{}'): cola de envio desbordada ({} bytes en cola, tope {}), se desconecta", GetID(), GetName(), Queued, kQueueHardCapBytes);
-        (void)Disconnect("cola de envio desbordada");
+        beammp_warnf("Cliente {} ('{}'): {} ({} bytes en cola, tope {}), se desconecta", GetID(), GetName(), kQueueOverflowReason, Queued, kQueueHardCapBytes);
+        ShutdownSocket();
         ClearQueue(); // free the memory now instead of waiting for the client object to die
+    }
+}
+
+void TClient::ShutdownSocket() {
+    std::scoped_lock SocketLock(mSocketMutex);
+    boost::system::error_code ec;
+    if (mSocket.is_open()) {
+        mSocket.shutdown(socket_base::shutdown_both, ec);
+        if (ec) {
+            beammp_debugf("Failed to shutdown client socket: {}", ec.message());
+        }
+    }
+}
+
+void TClient::SetTcpNoDelay() {
+    std::scoped_lock SocketLock(mSocketMutex);
+    boost::system::error_code ec;
+    if (mSocket.is_open()) {
+        mSocket.set_option(ip::tcp::no_delay(true), ec);
+        if (ec) {
+            beammp_debugf("Failed to set TCP_NODELAY on client {}: {}", GetID(), ec.message());
+        }
     }
 }
 

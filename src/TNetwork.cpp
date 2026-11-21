@@ -651,7 +651,10 @@ bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync
     boost::asio::write(Sock, boost::asio::buffer(ToSend), ec);
     if (ec) {
         beammp_debugf("write(): {}", ec.message());
-        DisconnectClient(c, "write() failed");
+        // An overflowed client was shut down by a foreign thread; its owner thread closes it.
+        if (!c.QueueOverflowed()) {
+            DisconnectClient(c, "write() failed");
+        }
         return false;
     }
     c.UpdatePingTime();
@@ -773,7 +776,7 @@ void TNetwork::Looper(const std::weak_ptr<TClient>& c) {
         if (!Client) {
             break;
         }
-        if (Client->IsDisconnected()) {
+        if (Client->IsDisconnected() || Client->QueueOverflowed()) {
             beammp_debug("client is disconnected, breaking client loop");
             break;
         }
@@ -786,7 +789,9 @@ void TNetwork::Looper(const std::weak_ptr<TClient>& c) {
                 }
                 // beammp_debug("sending a missed packet: " + QData);
                 if (!TCPSend(*Client, QData, true)) {
-                    DisconnectClient(Client, "Failed to TCPSend while clearing the missed packet queue");
+                    if (!Client->QueueOverflowed()) {
+                        DisconnectClient(Client, "Failed to TCPSend while clearing the missed packet queue");
+                    }
                     Client->ClearQueue();
                     break;
                 }
@@ -825,11 +830,17 @@ void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
             beammp_debug("client status < 0, breaking client loop");
             break;
         }
+        if (Client->QueueOverflowed()) {
+            // Marked by the producer that hit the hard cap (TClient::EnqueuePacket): this thread owns the socket.
+            DisconnectClient(Client, TClient::kQueueOverflowReason);
+            break;
+        }
 
         auto res = TCPRcv(*Client);
         if (res.empty()) {
             beammp_debug("TCPRcv empty");
-            DisconnectClient(Client, "TCPRcv failed");
+            // The read also fails when a foreign thread shut the socket down after a queue overflow.
+            DisconnectClient(Client, Client->QueueOverflowed() ? TClient::kQueueOverflowReason : "TCPRcv failed");
             break;
         }
         try {
