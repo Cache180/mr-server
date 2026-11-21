@@ -152,6 +152,26 @@ TServer& TClient::Server() const {
 void TClient::EnqueuePacket(const std::vector<uint8_t>& Packet) {
     std::unique_lock Lock(mMissedPacketsMutex);
     mPacketsSync.push(Packet);
+    mQueuedBytes.fetch_add(Packet.size(), std::memory_order_acq_rel);
+}
+
+bool TClient::DequeuePacket(std::vector<uint8_t>& Out) {
+    std::unique_lock Lock(mMissedPacketsMutex);
+    if (mPacketsSync.empty()) {
+        return false;
+    }
+    Out = std::move(mPacketsSync.front());
+    mPacketsSync.pop();
+    mQueuedBytes.fetch_sub(Out.size(), std::memory_order_acq_rel);
+    return true;
+}
+
+void TClient::ClearQueue() {
+    std::unique_lock Lock(mMissedPacketsMutex);
+    while (!mPacketsSync.empty()) {
+        mPacketsSync.pop();
+    }
+    mQueuedBytes.store(0, std::memory_order_release);
 }
 
 TClient::TClient(TServer& Server, ip::tcp::socket&& Socket)

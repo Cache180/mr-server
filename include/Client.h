@@ -103,6 +103,14 @@ public:
     void SetIsSynced(bool NewIsSynced) { mIsSynced = NewIsSynced; }
     void SetIsSyncing(bool NewIsSyncing) { mIsSyncing = NewIsSyncing; }
     void EnqueuePacket(const std::vector<uint8_t>& Packet);
+    // Bytes currently waiting in the queue. Producers add under the queue mutex in EnqueuePacket;
+    // the single consumer (the Looper) subtracts under the same mutex via the two functions below.
+    [[nodiscard]] size_t QueuedBytes() const { return mQueuedBytes.load(std::memory_order_acquire); }
+    // Pops the front packet into Out (queue mutex held inside). Returns false if the queue is empty.
+    [[nodiscard]] bool DequeuePacket(std::vector<uint8_t>& Out);
+    void ClearQueue();
+    // True only the first time it is called: lets the server log "dropping" once per client.
+    [[nodiscard]] bool MarkQueueDropLogged() { return !mQueueDropLogged.exchange(true, std::memory_order_acq_rel); }
     [[nodiscard]] std::queue<std::vector<uint8_t>>& MissedPacketQueue() { return mPacketsSync; }
     [[nodiscard]] const std::queue<std::vector<uint8_t>>& MissedPacketQueue() const { return mPacketsSync; }
     [[nodiscard]] size_t MissedPacketQueueSize() const { return mPacketsSync.size(); }
@@ -130,6 +138,8 @@ private:
     bool mIsSyncing = false;
     mutable std::mutex mMissedPacketsMutex;
     std::queue<std::vector<uint8_t>> mPacketsSync;
+    std::atomic<size_t> mQueuedBytes { 0 };
+    std::atomic<bool> mQueueDropLogged { false };
     std::unordered_map<std::string, std::string> mIdentifiers;
     bool mIsGuest = false;
     mutable std::mutex mVehicleDataMutex;

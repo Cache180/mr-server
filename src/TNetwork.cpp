@@ -48,6 +48,11 @@ typedef boost::asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVTIMEO> rcv
 
 static constexpr uint8_t MAX_CONCURRENT_CONNECTIONS = 10;
 static constexpr uint8_t MAX_GLOBAL_CONNECTIONS = 128;
+// Cap on the bytes queued for a "solo TCP" client before new UNRELIABLE packets (positions) are dropped
+// instead of queued. Positions are superseded by the next one, so dropping them costs nothing,
+// whereas an unbounded queue grows without limit for a client whose link carries less than the
+// position stream. Reliable packets are never dropped by this rule.
+static constexpr size_t kTcpOnlyQueueCapBytes = 512 * 1024;
 static constexpr uint8_t READ_TIMEOUT_S = 10; // seconds
 
 std::vector<uint8_t> StringToVector(const std::string& Str) {
@@ -764,21 +769,13 @@ void TNetwork::Looper(const std::weak_ptr<TClient>& c) {
             // debug("sending " + std::to_string(Client->MissedPacketQueueSize()) + " queued packets");
             while (Client->MissedPacketQueueSize() > 0) {
                 std::vector<uint8_t> QData { };
-                { // locked context
-                    std::unique_lock lock(Client->MissedPacketQueueMutex());
-                    if (Client->MissedPacketQueueSize() <= 0) {
-                        break;
-                    }
-                    QData = Client->MissedPacketQueue().front();
-                    Client->MissedPacketQueue().pop();
-                } // end locked context
+                if (!Client->DequeuePacket(QData)) {
+                    break;
+                }
                 // beammp_debug("sending a missed packet: " + QData);
                 if (!TCPSend(*Client, QData, true)) {
                     DisconnectClient(Client, "Failed to TCPSend while clearing the missed packet queue");
-                    std::unique_lock lock(Client->MissedPacketQueueMutex());
-                    while (!Client->MissedPacketQueue().empty()) {
-                        Client->MissedPacketQueue().pop();
-                    }
+                    Client->ClearQueue();
                     break;
                 }
             }
@@ -1254,6 +1251,21 @@ bool TNetwork::SendLarge(TClient& c, std::vector<uint8_t> Data, bool isSync) {
 bool TNetwork::Respond(TClient& c, const std::vector<uint8_t>& MSG, bool Rel, bool isSync) {
     char C = MSG.at(0);
     if (Rel || C == 'W' || C == 'Y' || C == 'V' || C == 'E' || compressBound(MSG.size()) > 1024) {
+        if (c.IsTcpOnly() && !isSync && c.IsSynced()) {
+            // "solo TCP" client: its Looper is the only writer of its socket, so reliable
+            // traffic is queued too (same compression as the queued branch of SendToAll).
+            // Sync-time sends (isSync, or before the client is synced) stay direct: the Looper
+            // does not drain until the client is synced.
+            if (c.IsDisconnected()) {
+                return true;
+            }
+            auto Queued = MSG;
+            if ((C == 'O' || C == 'T' || MSG.size() > 1000) && Queued.size() > 400) {
+                CompressProperly(Queued);
+            }
+            c.EnqueuePacket(Queued);
+            return true;
+        }
         if (C == 'O' || C == 'T' || MSG.size() > 1000) {
             return SendLarge(c, MSG, isSync);
         } else {
@@ -1391,6 +1403,12 @@ bool TNetwork::SendUnreliable(TClient& Client, std::vector<uint8_t> Data) {
         return UDPSend(Client, std::move(Data));
     }
     if (Client.IsDisconnected()) {
+        return true;
+    }
+    if (Client.QueuedBytes() > kTcpOnlyQueueCapBytes) {
+        if (Client.MarkQueueDropLogged()) {
+            beammp_debugf("Client {} ('{}') is not draining its TCP queue (> {} bytes), dropping its unreliable packets", Client.GetID(), Client.GetName(), kTcpOnlyQueueCapBytes);
+        }
         return true;
     }
     // Same wire format as UDPSend: large packets are compressed (`ABG:`). The client's own
