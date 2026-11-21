@@ -14,7 +14,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Pruebas del tope duro de la cola de envio por cliente (32 MiB).
+"""Pruebas de los limites del servidor: tope duro de la cola de envio por cliente
+(32 MiB) y limites previos a la autenticacion (plazo total y cupos por IP).
 
 El servidor ya debe estar corriendo (lo arranca el workflow de CI) con
 `test/mr/ServerConfig.ci.toml`. Variables de entorno (todas obligatorias salvo
@@ -69,6 +70,11 @@ READER = "PilotoLectorCola0001"
 FILLERS = ("PilotoRellenoColaA00", "PilotoRellenoColaB00")
 N_SENDER = "PilotoEmisorNCola001"
 N_VICTIM = "PilotoVictimaNCola01"
+AUTHED = "PilotoAutenticadoA"
+ENTRANT = "PilotoEntranteCupo"
+
+PREAUTH_DEADLINE_S = 10.0
+MAX_PREAUTH_PER_IP = 3
 assert all(len(n) == 20 for n in (SPAMMER, READER, N_SENDER, N_VICTIM) + FILLERS)
 
 
@@ -229,6 +235,91 @@ class QueueHardCapTests(unittest.TestCase):
                         "el RSS del server crecio %d KB" % (peak_kb - rss_before_kb))
         # el emisor no se ve afectado
         self.assert_served(sender, "el emisor")
+
+
+class PreAuthLimitTests(unittest.TestCase):
+    def open(self):
+        sock = mrclient.connect(HOST, PORT)
+        self.addCleanup(sock.close)
+        return sock
+
+    def hold_preauth(self):
+        """Conexion que ya paso el accept pero no se autentica: saluda con `MR1.0` y espera `A`."""
+        sock = self.open()
+        sock.sendall(b"C")
+        mrclient.send_packet(sock, b"MR1.0")
+        self.assertEqual(mrclient.recv_packet(sock), b"A")
+        return sock
+
+    def wait_closed(self, sock, limit):
+        """Segundos hasta que el servidor cierra `sock` (descarta lo que mande antes). Falla al pasar `limit`."""
+        started = time.monotonic()
+        while True:
+            remaining = limit - (time.monotonic() - started)
+            if remaining <= 0:
+                self.fail("el servidor no cerro la conexion en %.1f s" % limit)
+            sock.settimeout(remaining)
+            try:
+                if not sock.recv(4096):
+                    return time.monotonic() - started
+            except ConnectionError:
+                return time.monotonic() - started
+            except socket.timeout:
+                self.fail("el servidor no cerro la conexion en %.1f s" % limit)
+
+    def join(self, name):
+        deadline = time.monotonic() + 15.0
+        while True:
+            try:
+                sock, _ = mrclient.join(HOST, PORT, name, install_key(name))
+            except (mrclient.ProtocolError, ConnectionError, socket.timeout):
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.5)
+                continue
+            self.addCleanup(sock.close)
+            return sock
+
+    def assert_served(self, sock, who):
+        mrclient.send_packet(sock, b"p")
+        self.assertIsNotNone(
+            mrclient.recv_until(sock, lambda packet: packet[:2] == b"Ss", 5.0),
+            "%s dejo de ser atendido" % who,
+        )
+
+    def test_deadline_is_total_not_per_read(self):
+        # Cada lectura cabe en su plazo de 10 s por separado (la cabecera llega a los 6 s), pero el
+        # cuerpo del paquete de version no llega nunca: el plazo cuenta desde que conecto.
+        sock = self.open()
+        started = time.monotonic()
+        sock.sendall(b"C")
+        time.sleep(6.0)
+        sock.sendall(struct.pack("<i", 5))
+        closed_after = time.monotonic() - started + self.wait_closed(sock, PREAUTH_DEADLINE_S)
+        self.assertGreaterEqual(closed_after, PREAUTH_DEADLINE_S - 0.5)
+        self.assertLessEqual(closed_after, PREAUTH_DEADLINE_S + 2.0)
+
+    def fill_preauth_quota(self):
+        """Llena el cupo previo de esta IP y comprueba que la conexion siguiente se cierra."""
+        holders = [self.hold_preauth() for _ in range(MAX_PREAUTH_PER_IP)]
+        # el cupo (3 por IP) esta lleno: el servidor cierra la cuarta conexion nada mas aceptarla
+        self.wait_closed(self.open(), 5.0)
+        return holders
+
+    def test_preauth_quota_does_not_disturb_authenticated_client(self):
+        authed = self.join(AUTHED)
+        self.assert_served(authed, "el cliente autenticado (antes)")
+        holders = self.fill_preauth_quota()
+        self.assert_served(authed, "el cliente autenticado (con el cupo previo agotado)")
+        for holder in holders:
+            holder.close()
+        self.assert_served(authed, "el cliente autenticado (despues)")
+
+    def test_normal_entry_after_preauth_closed(self):
+        for holder in self.fill_preauth_quota():
+            holder.close()
+        entrant = self.join(ENTRANT)  # reintenta mientras el servidor retira las conexiones cerradas
+        self.assert_served(entrant, "la entrada normal")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,12 @@ PORT = int(os.environ.get("MR_SERVER_PORT", "30899"))
 KICK_WRONG_LAUNCHER = "Este servidor requiere MR Launcher: https://muertazosracing.com/launcher"
 KICK_OUTDATED = "MR Launcher desactualizado"
 KICK_NAME_IN_USE = "Nombre en uso: elige otro nombre de piloto"
+KICK_ENTRY_IN_PROGRESS = "Ya hay una entrada en curso con este launcher: espera unos segundos"
+
+# El plugin de CI (ci_plugin/main.lua) retiene onPlayerAuth 2 s para estos nombres: la
+# reserva del nombre sigue viva mientras otra entrada llega al servidor.
+SLOW_NAME_SAME = "PilotoLentoA"
+SLOW_NAME_OTHER = "PilotoLentoB"
 
 INSTALL_A = "a" * 32
 INSTALL_B = "b" * 32
@@ -174,6 +180,31 @@ class HandshakeTests(unittest.TestCase):
         # el socket del jugador viejo se cierra (no basta un simple timeout)
         with self.assertRaises(ConnectionError):
             mrclient.recv_packet(first)
+
+    def start_slow_entry(self, name, install):
+        """Envia la identidad de `name` sin esperar respuesta: el nombre queda reservado."""
+        sock = self.open()
+        sock.sendall(b"C")
+        mrclient.send_packet(sock, b"MR1.0")
+        self.assertEqual(mrclient.recv_packet(sock), b"A")
+        mrclient.send_packet(sock, identity(name, install))
+        time.sleep(0.5)  # el server ya parseo la identidad y espera a onPlayerAuth
+        return sock
+
+    def test_simultaneous_entry_same_install(self):
+        slow = self.start_slow_entry(SLOW_NAME_SAME, INSTALL_A)
+        ok, reply = mrclient.handshake(self.open(), "MR1.0", identity(SLOW_NAME_SAME, INSTALL_A))
+        self.assertFalse(ok)
+        self.assert_kicked(reply, KICK_ENTRY_IN_PROGRESS)
+        # la primera entrada no se ve afectada y termina aceptada
+        self.assertRegex(mrclient.recv_packet(slow), re.compile(rb"^P[0-9]+$"))
+
+    def test_simultaneous_entry_other_install(self):
+        slow = self.start_slow_entry(SLOW_NAME_OTHER, INSTALL_A)
+        ok, reply = mrclient.handshake(self.open(), "MR1.0", identity(SLOW_NAME_OTHER, INSTALL_B))
+        self.assertFalse(ok)
+        self.assert_kicked(reply, KICK_NAME_IN_USE)
+        self.assertRegex(mrclient.recv_packet(slow), re.compile(rb"^P[0-9]+$"))
 
     def test_silent_client_does_not_block(self):
         silent = self.open()
